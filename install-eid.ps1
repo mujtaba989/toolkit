@@ -1,5 +1,4 @@
-﻿#Requires -RunAsAdministrator
-<#
+﻿<#
 .SYNOPSIS
     Emirates ID Card Toolkit – Silent Deployer
 
@@ -24,8 +23,6 @@
     Log  : C:\Windows\Temp\EIDToolkit-install.log
     Store: HKLM:\SOFTWARE\Toolkit\EID
 #>
-
-[CmdletBinding()]
 param(
     [string] $PackageKey  = "Abc@1234",
     [string] $KeyFile

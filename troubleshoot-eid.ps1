@@ -1,5 +1,4 @@
-﻿#Requires -RunAsAdministrator
-<#
+﻿<#
 .SYNOPSIS
     Emirates ID Card Toolkit – Troubleshooter & WSS Stability Fixer
 
@@ -20,8 +19,6 @@
 .EXAMPLE
     irm https://raw.githubusercontent.com/mujtaba989/toolkit/main/troubleshoot-eid.ps1 | iex
 #>
-
-[CmdletBinding()]
 param(
     [switch] $ReportOnly   # diagnose only, make no changes
 )
