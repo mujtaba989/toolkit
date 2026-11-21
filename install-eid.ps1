@@ -514,6 +514,26 @@ try {
     & sc.exe config      "$($ourSvc.Name)" DisplayName= "$SVC_DISPLAY" start= auto | Out-Null
     & sc.exe description "$($ourSvc.Name)" "$SVC_DISPLAY"              | Out-Null
 
+    # Configure auto-recovery (restart service automatically on failure)
+    & sc.exe failure "$($ourSvc.Name)" reset= 3600 actions= restart/10000/restart/30000/restart/60000 | Out-Null
+
+    # Ensure Windows Smart Card Service is set to Automatic and running
+    Set-Service SCardSvr -StartupType Automatic -EA SilentlyContinue
+    Start-Service SCardSvr -EA SilentlyContinue
+
+    # Ensure Firewall allows EIDAToolkitService
+    $exeFullPath = Join-Path $INSTALL_DIR $SVC_EXE_NAME
+    New-NetFirewallRule -DisplayName "Emirates ID Card Toolkit" -Direction Inbound `
+        -Program $exeFullPath -Action Allow -Profile Any -EA SilentlyContinue | Out-Null
+
+    # Disable USB selective suspend in power plan to prevent readers from dropping
+    $planGuid = (powercfg /getactivescheme) -replace '.*GUID:\s+(\S+).*','$1'
+    if ($planGuid) {
+        powercfg /setacvalueindex $planGuid 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>$null
+        powercfg /setdcvalueindex $planGuid 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>$null
+        powercfg /setactive $planGuid 2>$null
+    }
+
     $conflict = Get-Service ICAToolkit -EA SilentlyContinue
     if ($conflict -and $conflict.Status -eq "Running") {
         Write-Warn "ICAToolkit service is also running — only one instance can be active at a time."
