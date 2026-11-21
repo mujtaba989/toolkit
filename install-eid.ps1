@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Emirates ID Card Toolkit – Silent Deployer
 

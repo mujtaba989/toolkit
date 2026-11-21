@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Emirates ID Card Toolkit – Troubleshooter & WSS Stability Fixer
 
