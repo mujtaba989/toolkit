@@ -19,8 +19,8 @@
   Windows 10 / PowerShell 5.1 compatible.
 #>
 param(
-    [string]$Password,       # optional: give the password without a prompt
-    [string]$PasswordFile    # optional: read the password from a file (e.g. a restricted share)
+    [string]$Password     = "Abc@1234",   # package decryption password
+    [string]$PasswordFile                 # optional: read the password from a file instead
 )
 
 $Repo      = "mujtaba989/toolkit"
