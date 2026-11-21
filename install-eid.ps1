@@ -1,578 +1,553 @@
-﻿<#
-  Install / update the Emirates ID Card Toolkit Service from GitHub (encrypted package).
+﻿#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+    Emirates ID Card Toolkit – Silent Deployer
 
-  Manual install (admin PowerShell) - asks for the package password:
-      irm https://raw.githubusercontent.com/mujtaba989/toolkit/main/install-eid.ps1 | iex
+.DESCRIPTION
+    Pulls the latest toolkit release from GitHub, verifies the package
+    integrity, and performs a clean install of the Emirates ID Card
+    Toolkit Service on Windows 10 / 11.
 
-  What it does
-  - Checks the latest GitHub Release. If this PC already has it -> stops (no password asked).
-  - Downloads EID_MOHRE.bin, asks for the password, verifies and decrypts it.
-  - Clean reinstall on every new release, ONLY for "Emirates ID Card Toolkit Service":
-    removes that service + C:\Program Files (x86)\Emirates ID Card Toolkit Service (configs backed up
-    to C:\ProgramData\EID_MOHRE), then installs the MSI there again.
-    Other toolkit services (e.g. ICAToolkit) are never touched.
-  - Copies every other file in the package (config_* and any extra files, subfolders included) into
-    that folder. Items listed in the package's copy-map.txt ("item = destination folder") are copied
-    to that destination instead. Then starts the service as 'Emirates ID Card Toolkit Service'.
-  - Log: C:\Windows\Temp\EID_MOHRE-deploy.log
+.PARAMETER PackageKey
+    Decryption key for the release package. If omitted the script uses
+    the built-in default.
 
-  Windows 10 / PowerShell 5.1 compatible.
+.PARAMETER KeyFile
+    Path to a text file containing the decryption key (alternative to
+    typing it interactively).
+
+.EXAMPLE
+    # One-liner (run as Administrator):
+    irm https://raw.githubusercontent.com/mujtaba989/toolkit/main/install-eid.ps1 | iex
+
+.NOTES
+    Log  : C:\Windows\Temp\EIDToolkit-install.log
+    Store: HKLM:\SOFTWARE\Toolkit\EID
 #>
+
+[CmdletBinding()]
 param(
-    [string]$Password     = "Abc@1234",   # package decryption password
-    [string]$PasswordFile                 # optional: read the password from a file instead
+    [string] $PackageKey  = "Abc@1234",
+    [string] $KeyFile
 )
 
-$Repo      = "mujtaba989/toolkit"
-$AssetName = "EID_MOHRE.bin"
-$Product   = "Emirates ID Card Toolkit Service"
-$RegKey    = "HKLM:\SOFTWARE\EID_MOHRE"
-
+Set-StrictMode -Off
 $ErrorActionPreference = "Stop"
-
-# ── TLS 1.2 (required by GitHub on older .NET stacks) ──────────────────────
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
 Add-Type -AssemblyName System.Security
 
-# ── Transcript (wrap so a locked/missing log never kills the script) ────────
-$transcriptStarted = $false
+# ─────────────────────────────────────────────────────────────────────────────
+#  CONSTANTS
+# ─────────────────────────────────────────────────────────────────────────────
+$GH_REPO      = "mujtaba989/toolkit"
+$PKG_FILENAME = "EID_MOHRE.bin"
+$SVC_DISPLAY  = "Emirates ID Card Toolkit Service"
+$INSTALL_ROOT = if (${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)} } else { $env:ProgramFiles }
+$INSTALL_DIR  = Join-Path $INSTALL_ROOT $SVC_DISPLAY
+$REG_PATH     = "HKLM:\SOFTWARE\Toolkit\EID"
+$LOG_FILE     = "$env:WINDIR\Temp\EIDToolkit-install.log"
+$MSI_PRODUCT  = "{E73E6470-DC25-4CCE-B26C-0730283B0D32}"
+$MSI_UPGRADE  = "{511AC963-BA5A-4875-9058-E5E27600023E}"
+$SVC_EXE_NAME = "EIDAToolkitService.exe"
+$BACKUP_ROOT  = "$env:ProgramData\EIDToolkit"
+
+$_tmpDir = $null   # cleaned up in finally
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  LOGGING
+# ─────────────────────────────────────────────────────────────────────────────
+$_transcriptOn = $false
 try {
-    Start-Transcript -Path "$env:WINDIR\Temp\EID_MOHRE-deploy.log" -Append -ErrorAction SilentlyContinue | Out-Null
-    $transcriptStarted = $true
+    Start-Transcript -Path $LOG_FILE -Append -ErrorAction SilentlyContinue | Out-Null
+    $_transcriptOn = $true
 } catch { }
 
-$Work = $null
+function Write-Step  { param($msg) Write-Host "  --> $msg" -ForegroundColor Cyan }
+function Write-Ok    { param($msg) Write-Host "  [OK] $msg" -ForegroundColor Green }
+function Write-Warn  { param($msg) Write-Warning $msg }
+function Write-Fatal { param($msg) throw $msg }
 
-$TargetDir   = Join-Path $(if (${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)} } else { $env:ProgramFiles }) $Product
-$ServiceDisp = "Emirates ID Card Toolkit Service"   # display name shown in services.msc
+# ─────────────────────────────────────────────────────────────────────────────
+#  PBKDF2-SHA256  (native .NET 4.7.2+ with PS 5.1 fallback)
+# ─────────────────────────────────────────────────────────────────────────────
+function Derive-Keys {
+    param([string]$Pass, [byte[]]$Salt, [int]$Rounds, [int]$Len)
 
-# ── Helper: installed product via registry ──────────────────────────────────
-function Get-Installed {
-    $paths = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
-             "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
-    Get-ItemProperty $paths -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayName -eq $Product } |
-        Select-Object -First 1
-}
-
-# ── Helper: strip service arguments to get the bare exe path ───────────────
-function Get-SvcExe($svc) {
-    ($svc.PathName -replace '^"([^"]+)".*$', '$1') -replace '\.exe\s+.*$', '.exe'
-}
-
-# ── All toolkit services on this PC (used ONLY to protect non-target ones) ─
-function Get-ToolkitServices {
-    # PS 5.1 / Win10: Get-CimInstance is available; fall back to Get-WmiObject if not
+    # Try the modern overload first
     try {
-        Get-CimInstance Win32_Service -ErrorAction Stop |
-            Where-Object { $_.PathName -like "*EIDAToolkitService.exe*" -or $_.PathName -like "*ICAToolkit*" }
-    } catch {
-        Get-WmiObject Win32_Service -ErrorAction SilentlyContinue |
-            Where-Object { $_.PathName -like "*EIDAToolkitService.exe*" -or $_.PathName -like "*ICAToolkit*" }
+        $h   = [Security.Cryptography.HashAlgorithmName]::SHA256
+        $kdf = New-Object Security.Cryptography.Rfc2898DeriveBytes($Pass, $Salt, $Rounds, $h)
+        return $kdf.GetBytes($Len)
+    } catch { }
+
+    # Manual PBKDF2-HMAC-SHA256 fallback (PS 5.1 / early Win10 builds)
+    $pwd  = [Text.Encoding]::UTF8.GetBytes($Pass)
+    $hmac = New-Object Security.Cryptography.HMACSHA256 (,$pwd)
+    $out  = New-Object byte[] $Len
+    $pos  = 0; $blk = 1
+
+    while ($pos -lt $Len) {
+        $ctr = [BitConverter]::GetBytes([uint32]$blk)
+        if ([BitConverter]::IsLittleEndian) { [Array]::Reverse($ctr) }
+        $input = New-Object byte[] ($Salt.Length + 4)
+        [Array]::Copy($Salt, 0, $input, 0,            $Salt.Length)
+        [Array]::Copy($ctr,  0, $input, $Salt.Length, 4)
+
+        $u = $hmac.ComputeHash($input)
+        $t = [byte[]] $u.Clone()
+        for ($r = 1; $r -lt $Rounds; $r++) {
+            $u = $hmac.ComputeHash($u)
+            for ($j = 0; $j -lt $t.Length; $j++) { $t[$j] = $t[$j] -bxor $u[$j] }
+        }
+        $take = [Math]::Min($t.Length, $Len - $pos)
+        [Array]::Copy($t, 0, $out, $pos, $take)
+        $pos += $take; $blk++
     }
+    $hmac.Dispose()
+    return $out
 }
 
-function Test-InTarget([string]$path) {
-    $path -and $path.TrimEnd('\').StartsWith($TargetDir, [StringComparison]::OrdinalIgnoreCase)
-}
-
-function Get-EmiratesServices {
-    Get-ToolkitServices | Where-Object {
-        $_.Name -eq "ICAToolkitService" -or
-        $_.DisplayName -eq $ServiceDisp -or
-        (Test-InTarget (Get-SvcExe $_))
-    }
-}
-
-function Get-TargetService {
-    Get-ToolkitServices |
-        Where-Object { Test-InTarget (Get-SvcExe $_) } |
-        Select-Object -First 1
-}
-
-# ── Native MSI.dll P/Invoke (avoids COM "Type mismatch" in PS 5.1) ─────────
-if (-not ("MsiNative" -as [type])) {
+# ─────────────────────────────────────────────────────────────────────────────
+#  MSI P/INVOKE  (avoids COM "Type mismatch" in PowerShell 5.1)
+# ─────────────────────────────────────────────────────────────────────────────
+if (-not ("EidMsiHelper" -as [type])) {
     Add-Type -TypeDefinition @"
 using System; using System.Text; using System.Runtime.InteropServices;
-public static class MsiNative {
-    [DllImport("msi.dll", CharSet = CharSet.Unicode)] static extern uint MsiOpenDatabase(string path, IntPtr persist, out IntPtr db);
-    [DllImport("msi.dll", CharSet = CharSet.Unicode)] static extern uint MsiDatabaseOpenView(IntPtr db, string query, out IntPtr view);
-    [DllImport("msi.dll")] static extern uint MsiViewExecute(IntPtr view, IntPtr record);
-    [DllImport("msi.dll")] static extern uint MsiViewClose(IntPtr view);
+public static class EidMsiHelper {
+    [DllImport("msi.dll", CharSet=CharSet.Unicode)] static extern uint MsiOpenDatabase(string p, IntPtr mode, out IntPtr db);
+    [DllImport("msi.dll", CharSet=CharSet.Unicode)] static extern uint MsiDatabaseOpenView(IntPtr db, string sql, out IntPtr view);
+    [DllImport("msi.dll")] static extern uint MsiViewExecute(IntPtr v, IntPtr r);
+    [DllImport("msi.dll")] static extern uint MsiViewClose(IntPtr v);
     [DllImport("msi.dll")] static extern uint MsiDatabaseCommit(IntPtr db);
     [DllImport("msi.dll")] static extern uint MsiCloseHandle(IntPtr h);
-    [DllImport("msi.dll", CharSet = CharSet.Unicode)] static extern int MsiGetComponentPath(string product, string component, StringBuilder path, ref uint len);
-    public static void RunQueries(string path, string[] queries) {
-        IntPtr db; uint r = MsiOpenDatabase(path, (IntPtr)1, out db);   // 1 = transact mode
-        if (r != 0) throw new Exception("MsiOpenDatabase failed: " + r);
+    [DllImport("msi.dll", CharSet=CharSet.Unicode)] static extern int MsiGetComponentPath(string prod, string comp, StringBuilder buf, ref uint len);
+
+    public static void PatchDatabase(string path, string[] queries) {
+        IntPtr db; if (MsiOpenDatabase(path, (IntPtr)1, out db) != 0) throw new Exception("MsiOpenDatabase failed");
         try {
-            foreach (string q in queries) {
-                IntPtr v; r = MsiDatabaseOpenView(db, q, out v);
-                if (r != 0) throw new Exception("MsiDatabaseOpenView failed: " + r);
-                try { r = MsiViewExecute(v, IntPtr.Zero); if (r != 0) throw new Exception("MsiViewExecute failed: " + r); }
+            foreach (var q in queries) {
+                IntPtr v; if (MsiDatabaseOpenView(db, q, out v) != 0) throw new Exception("MsiDatabaseOpenView failed");
+                try { if (MsiViewExecute(v, IntPtr.Zero) != 0) throw new Exception("MsiViewExecute failed"); }
                 finally { MsiViewClose(v); MsiCloseHandle(v); }
             }
-            r = MsiDatabaseCommit(db); if (r != 0) throw new Exception("MsiDatabaseCommit failed: " + r);
+            if (MsiDatabaseCommit(db) != 0) throw new Exception("MsiDatabaseCommit failed");
         } finally { MsiCloseHandle(db); }
     }
-    public static string ComponentPath(string product, string component) {
-        uint len = 1024; StringBuilder sb = new StringBuilder((int)len);
-        MsiGetComponentPath(product, component, sb, ref len);
+
+    public static string GetComponentPath(string prod, string comp) {
+        uint len = 1024; var sb = new StringBuilder((int)len);
+        MsiGetComponentPath(prod, comp, sb, ref len);
         return sb.ToString();
     }
 }
 "@
 }
 
-# ── PBKDF2-SHA256: use the .NET 4.7.2+ overload when available,
-#    otherwise fall back to a manual HMAC-SHA256 PBKDF2 loop ──────────────
-function Invoke-Pbkdf2Sha256 {
-    param(
-        [string] $Password,
-        [byte[]] $Salt,
-        [int]    $Iterations,
-        [int]    $ByteCount
-    )
+# ─────────────────────────────────────────────────────────────────────────────
+#  UTILITY FUNCTIONS
+# ─────────────────────────────────────────────────────────────────────────────
 
-    # Try the native .NET 4.7.2+ 4-arg constructor first (available on most Win10 builds)
-    try {
-        $han = [Security.Cryptography.HashAlgorithmName]::SHA256
-        $kdf = New-Object Security.Cryptography.Rfc2898DeriveBytes($Password, $Salt, $Iterations, $han)
-        return $kdf.GetBytes($ByteCount)
-    } catch { }
-
-    # Fallback: manual PBKDF2-HMAC-SHA256 (pure .NET, no extra deps)
-    $pwdBytes = [Text.Encoding]::UTF8.GetBytes($Password)
-    $hmac     = New-Object Security.Cryptography.HMACSHA256(,$pwdBytes)
-    $result   = New-Object byte[] $ByteCount
-    $offset   = 0
-    $block    = 1
-
-    while ($offset -lt $ByteCount) {
-        # U1 = PRF(Password, Salt || INT(block))
-        $blockBytes = [BitConverter]::GetBytes([uint32]$block)
-        if ([BitConverter]::IsLittleEndian) { [Array]::Reverse($blockBytes) }   # big-endian
-        $saltBlock = New-Object byte[] ($Salt.Length + 4)
-        [Array]::Copy($Salt, 0, $saltBlock, 0, $Salt.Length)
-        [Array]::Copy($blockBytes, 0, $saltBlock, $Salt.Length, 4)
-
-        $u = $hmac.ComputeHash($saltBlock)
-        $t = $u.Clone()
-
-        for ($iter = 1; $iter -lt $Iterations; $iter++) {
-            $u = $hmac.ComputeHash($u)
-            for ($b = 0; $b -lt $t.Length; $b++) { $t[$b] = $t[$b] -bxor $u[$b] }
-        }
-
-        $take = [Math]::Min($t.Length, $ByteCount - $offset)
-        [Array]::Copy($t, 0, $result, $offset, $take)
-        $offset += $take
-        $block++
-    }
-
-    $hmac.Dispose()
-    return $result
+# GUID -> Windows Installer "squished" form
+function Squish-Guid([string]$g) {
+    $g = $g.Trim('{}').Replace('-','')
+    $r = { param($s) -join ($s.ToCharArray()[($s.Length-1)..0]) }
+    $o = (& $r $g.Substring(0,8)) + (& $r $g.Substring(8,4)) + (& $r $g.Substring(12,4))
+    for ($i=16; $i -lt 32; $i+=2) { $o += "$($g[$i+1])$($g[$i])" }
+    $o.ToUpper()
 }
 
-# ── Where the registered MSI's service exe lives ───────────────────────────
-function Get-RegisteredExe([string]$productCode) {
+# Strip service arguments to get the bare exe path
+function Get-ExePath($svc) {
+    ($svc.PathName -replace '^"([^"]+)".*$','$1') -replace '\.exe\s+.*$','.exe'
+}
+
+# Is a path inside our install folder?
+function Is-OurPath([string]$p) {
+    $p -and $p.TrimEnd('\').StartsWith($INSTALL_DIR, [StringComparison]::OrdinalIgnoreCase)
+}
+
+# All EID-family services on this machine
+function Get-AllToolkitSvcs {
+    try   { Get-CimInstance Win32_Service -EA Stop | Where-Object { $_.PathName -like "*EIDAToolkitService*" -or $_.PathName -like "*ICAToolkit*" } }
+    catch { Get-WmiObject  Win32_Service -EA SilentlyContinue | Where-Object { $_.PathName -like "*EIDAToolkitService*" -or $_.PathName -like "*ICAToolkit*" } }
+}
+
+# Only the service installed in OUR folder
+function Get-OurService {
+    Get-AllToolkitSvcs | Where-Object { Is-OurPath (Get-ExePath $_) } | Select-Object -First 1
+}
+
+# Services that match by display name or live in our folder
+function Get-TargetSvcs {
+    Get-AllToolkitSvcs | Where-Object {
+        $_.DisplayName -eq $SVC_DISPLAY -or $_.Name -eq "ICAToolkitService" -or (Is-OurPath (Get-ExePath $_))
+    }
+}
+
+# Is the toolkit already fully installed?
+function Test-AlreadyInstalled {
+    (Test-Path (Join-Path $INSTALL_DIR $SVC_EXE_NAME)) -and (Get-OurService)
+}
+
+# Registry lookup for installed MSI
+function Find-InstalledMsi {
+    $keys = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    Get-ItemProperty $keys -EA SilentlyContinue | Where-Object { $_.DisplayName -eq $SVC_DISPLAY } | Select-Object -First 1
+}
+
+# Has Windows Installer cached the product?
+function Test-MsiRegistered {
+    $sq = Squish-Guid $MSI_PRODUCT
+    if (Test-Path "HKLM:\SOFTWARE\Classes\Installer\Products\$sq")  { return $true }
+    if (Test-Path "HKCU:\Software\Microsoft\Installer\Products\$sq") { return $true }
+    [bool](Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData" -EA SilentlyContinue |
+           Where-Object { Test-Path (Join-Path $_.PSPath "Products\$sq") })
+}
+
+# Where did the MSI install the service exe?
+function Get-MsiExePath([string]$prodCode) {
     try {
-        $p = [MsiNative]::ComponentPath($productCode, "{D34D7FD1-31B2-5F8D-9C4F-64A73D251BD8}")
+        $p = [EidMsiHelper]::GetComponentPath($prodCode, "{D34D7FD1-31B2-5F8D-9C4F-64A73D251BD8}")
         if ($p) { $p } else { $null }
     } catch { $null }
 }
 
-# ── Clean uninstall (patches MOHRE's broken uninstall sequence first) ───────
-function Invoke-CleanUninstall([string]$productCode) {
-    $local = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Products" -ErrorAction SilentlyContinue |
-             ForEach-Object { Get-ItemProperty (Join-Path $_.PSPath "InstallProperties") -ErrorAction SilentlyContinue } |
-             Where-Object { $_.DisplayName -eq $Product } | Select-Object -First 1 -ExpandProperty LocalPackage
-    $local = [string]$local
-    if ($local -and (Test-Path $local)) {
-        $bk = Join-Path $env:ProgramData "EID_MOHRE"
-        New-Item -ItemType Directory $bk -Force | Out-Null
-        Copy-Item $local (Join-Path $bk ("cached_" + (Split-Path $local -Leaf))) -Force
-        (Get-Item $local).IsReadOnly = $false
-        $queries = foreach ($a in "ExecInstallService", "ExecRemoveService", "ExecDeleteFiles") {
-            "UPDATE ``InstallExecuteSequence`` SET ``Condition`` = '0' WHERE ``Action`` = '$a'"
+# Download with WebClient (handles S3 redirects better than IWR on PS 5.1)
+function Download-File([string]$Url, [hashtable]$Headers, [string]$Out) {
+    try {
+        $wc = New-Object Net.WebClient
+        foreach ($k in $Headers.Keys) { $wc.Headers[$k] = $Headers[$k] }
+        $wc.DownloadFile($Url, $Out)
+    } catch {
+        Invoke-WebRequest -Uri $Url -Headers $Headers -OutFile $Out -UseBasicParsing -MaximumRedirection 10
+    }
+}
+
+# Patch and run MSI uninstall (works around MOHRE's broken custom actions)
+function Remove-OldInstall([string]$prodCode) {
+    $cached = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Products" -EA SilentlyContinue |
+              ForEach-Object { Get-ItemProperty (Join-Path $_.PSPath "InstallProperties") -EA SilentlyContinue } |
+              Where-Object { $_.DisplayName -eq $SVC_DISPLAY } | Select-Object -First 1 -ExpandProperty LocalPackage
+
+    if ($cached -and (Test-Path $cached)) {
+        New-Item -ItemType Directory $BACKUP_ROOT -Force | Out-Null
+        Copy-Item $cached (Join-Path $BACKUP_ROOT ("msi_" + (Split-Path $cached -Leaf))) -Force
+        (Get-Item $cached).IsReadOnly = $false
+        $patches = @("ExecInstallService","ExecRemoveService","ExecDeleteFiles") | ForEach-Object {
+            "UPDATE ``InstallExecuteSequence`` SET ``Condition`` = '0' WHERE ``Action`` = '$_'"
         }
-        [MsiNative]::RunQueries($local, [string[]]$queries)
-        Write-Output "Patched cached installer ($local) so it can uninstall"
+        [EidMsiHelper]::PatchDatabase($cached, [string[]]$patches)
+        Write-Step "Patched cached MSI so uninstall completes cleanly"
     } else {
-        Write-Warning "Cached installer not found - trying a normal uninstall"
+        Write-Warn "Cached MSI not found — attempting standard uninstall"
     }
-    $ulog = "$env:WINDIR\Temp\EID_MOHRE-uninstall.log"
-    $p = Start-Process msiexec.exe -ArgumentList "/x $productCode /qn /norestart /L*v `"$ulog`"" -Wait -PassThru
-    if ($p.ExitCode -notin 0, 3010, 1605) {
-        throw "Uninstall of the old version failed (exit $($p.ExitCode)). See $ulog"
-    }
-    Write-Output "Old version uninstalled"
+
+    $ulog = "$env:WINDIR\Temp\EIDToolkit-uninstall.log"
+    $p = Start-Process msiexec.exe -ArgumentList "/x $prodCode /qn /norestart /L*v `"$ulog`"" -Wait -PassThru
+    if ($p.ExitCode -notin 0,3010,1605) { Write-Fatal "Uninstall failed (code $($p.ExitCode)) — see $ulog" }
+    Write-Ok "Previous version removed"
 }
 
-# ── GUID squish for installer registry lookups ──────────────────────────────
-function ConvertTo-Squished([string]$guid) {
-    $g   = $guid.Trim('{}').Replace('-', '')
-    $rev = { param($t) -join ($t.ToCharArray()[($t.Length - 1)..0]) }
-    $out = (& $rev $g.Substring(0, 8)) + (& $rev $g.Substring(8, 4)) + (& $rev $g.Substring(12, 4))
-    for ($i = 16; $i -lt 32; $i += 2) { $out += "$($g[$i + 1])$($g[$i])" }
-    $out.ToUpper()
-}
-
-$ProductCode = "{E73E6470-DC25-4CCE-B26C-0730283B0D32}"
-$UpgradeCode = "{511AC963-BA5A-4875-9058-E5E27600023E}"
-
-function Test-ProductRegistered {
-    $sq = ConvertTo-Squished $ProductCode
-    (Test-Path "HKLM:\SOFTWARE\Classes\Installer\Products\$sq") -or
-    (Test-Path "HKCU:\Software\Microsoft\Installer\Products\$sq") -or
-    [bool](Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData" -ErrorAction SilentlyContinue |
-           Where-Object { Test-Path (Join-Path $_.PSPath "Products\$sq") })
-}
-
-function Remove-ProductRegistration {
-    $sq  = ConvertTo-Squished $ProductCode
-    $usq = ConvertTo-Squished $UpgradeCode
-    $bk  = Join-Path $env:ProgramData ("EID_MOHRE\registry_" + (Get-Date -Format "yyyyMMdd_HHmmss"))
+# Scrub every Windows Installer registration for the product
+function Clear-MsiRegistration {
+    $sq  = Squish-Guid $MSI_PRODUCT
+    $usq = Squish-Guid $MSI_UPGRADE
+    $bk  = Join-Path $BACKUP_ROOT ("reg_" + (Get-Date -Format "yyyyMMdd_HHmmss"))
     New-Item -ItemType Directory $bk -Force | Out-Null
-    $keys = @(
+
+    $targets = @(
         "HKLM:\SOFTWARE\Classes\Installer\Products\$sq",
         "HKLM:\SOFTWARE\Classes\Installer\Features\$sq",
         "HKCU:\Software\Microsoft\Installer\Products\$sq",
         "HKCU:\Software\Microsoft\Installer\Features\$sq",
-        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$ProductCode",
-        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\$ProductCode"
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$MSI_PRODUCT",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\$MSI_PRODUCT"
     )
     $ud = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData"
-    foreach ($sid in Get-ChildItem $ud -ErrorAction SilentlyContinue) {
-        $keys += Join-Path $sid.PSPath "Products\$sq"
-    }
+    Get-ChildItem $ud -EA SilentlyContinue | ForEach-Object { $targets += Join-Path $_.PSPath "Products\$sq" }
+
     $n = 0
-    foreach ($k in $keys) {
+    foreach ($k in $targets) {
         if (Test-Path $k) {
-            $reg = (Convert-Path $k) -replace '^HKEY_LOCAL_MACHINE', 'HKLM' -replace '^HKEY_CURRENT_USER', 'HKCU'
+            $reg = (Convert-Path $k) -replace '^HKEY_LOCAL_MACHINE','HKLM' -replace '^HKEY_CURRENT_USER','HKCU'
             & reg.exe export "$reg" (Join-Path $bk "key$n.reg") /y | Out-Null
-            Remove-Item $k -Recurse -Force
-            $n++
+            Remove-Item $k -Recurse -Force; $n++
         }
     }
-    foreach ($uc in "HKLM:\SOFTWARE\Classes\Installer\UpgradeCodes\$usq",
-                    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UpgradeCodes\$usq",
-                    "HKCU:\Software\Microsoft\Installer\UpgradeCodes\$usq") {
-        if (Test-Path $uc) { Remove-ItemProperty $uc -Name $sq -ErrorAction SilentlyContinue }
+
+    foreach ($uc in @(
+        "HKLM:\SOFTWARE\Classes\Installer\UpgradeCodes\$usq",
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UpgradeCodes\$usq",
+        "HKCU:\Software\Microsoft\Installer\UpgradeCodes\$usq")) {
+        if (Test-Path $uc) { Remove-ItemProperty $uc -Name $sq -EA SilentlyContinue }
     }
-    # Component references to this product
-    foreach ($sid in Get-ChildItem $ud -ErrorAction SilentlyContinue) {
-        $c = Join-Path $sid.PSPath "Components"
-        Get-ChildItem $c -ErrorAction SilentlyContinue | ForEach-Object {
-            if ($null -ne $_.GetValue($sq, $null)) {
-                Remove-ItemProperty $_.PSPath -Name $sq -ErrorAction SilentlyContinue
-            }
+
+    Get-ChildItem $ud -EA SilentlyContinue | ForEach-Object {
+        Get-ChildItem (Join-Path $_.PSPath "Components") -EA SilentlyContinue | ForEach-Object {
+            if ($null -ne $_.GetValue($sq, $null)) { Remove-ItemProperty $_.PSPath -Name $sq -EA SilentlyContinue }
         }
     }
-    Write-Output "Removed $n leftover installer registration key(s) (backup: $bk)"
+    Write-Ok "Cleared $n stale installer registration(s)  (backup: $bk)"
 }
 
-function Test-TargetInstalled {
-    (Test-Path (Join-Path $TargetDir "EIDAToolkitService.exe")) -and (Get-TargetService)
-}
-
-# ── Helper: Invoke-WebRequest with redirect support (PS 5.1 / Win10) ───────
-function Invoke-WebRequestCompat {
-    param(
-        [string]     $Uri,
-        [hashtable]  $Headers,
-        [string]     $OutFile
-    )
-    # PS 5.1 Invoke-WebRequest follows redirects by default (MaximumRedirection default = 5).
-    # GitHub asset downloads redirect to S3; we need to drop the Authorization/Accept headers
-    # on the redirect or S3 returns a 400. Use WebClient as a reliable fallback.
-    try {
-        $wc = New-Object Net.WebClient
-        foreach ($k in $Headers.Keys) { $wc.Headers.Add($k, $Headers[$k]) }
-        $wc.DownloadFile($Uri, $OutFile)
-    } catch {
-        # Fallback: Invoke-WebRequest (slower on large files but always present)
-        Invoke-WebRequest -Uri $Uri -Headers $Headers -OutFile $OutFile -UseBasicParsing -MaximumRedirection 10
-    }
-}
-
-# ════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+#  MAIN
+# ─────────────────────────────────────────────────────────────────────────────
 try {
-    # ── 0. Must be Administrator ────────────────────────────────────────────
-    $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-                 [Security.Principal.WindowsBuiltInRole]::Administrator)
-    if (-not $admin) { throw "Run PowerShell as Administrator." }
+    Write-Host ""
+    Write-Host "  Emirates ID Card Toolkit – Deployer" -ForegroundColor Yellow
+    Write-Host "  =====================================" -ForegroundColor Yellow
+    Write-Host ""
 
-    # ── 1. Latest release - stop early if already up to date ───────────────
-    $h   = @{ "User-Agent" = "EID_MOHRE-installer"; "Accept" = "application/vnd.github+json" }
-    $rel = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest" -Headers $h
-    $tag = $rel.tag_name
-    $cur = (Get-ItemProperty $RegKey -Name Version -ErrorAction SilentlyContinue).Version
-    Write-Output "Latest release: $tag   Installed: $(if ($cur) { $cur } else { 'none' })"
-    if ($cur -eq $tag -and (Test-TargetInstalled)) { Write-Output "Already up to date."; return }
+    # ── STEP 1  Check for a newer release ────────────────────────────────────
+    Write-Step "Checking for latest release on GitHub..."
+    $apiHdr  = @{ "User-Agent" = "EIDToolkit-Deployer/1.0"; "Accept" = "application/vnd.github+json" }
+    $release = Invoke-RestMethod "https://api.github.com/repos/$GH_REPO/releases/latest" -Headers $apiHdr
+    $latest  = $release.tag_name
+    $current = (Get-ItemProperty $REG_PATH -Name Version -EA SilentlyContinue).Version
 
-    $asset = $rel.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
-    if (-not $asset) { throw "Release $tag has no $AssetName attached." }
+    Write-Host "    Latest : $latest"
+    Write-Host "    Current: $(if ($current) { $current } else { 'not installed' })"
 
-    # ── 2. Password ─────────────────────────────────────────────────────────
-    if (-not $Password -and $PasswordFile) { $Password = (Get-Content $PasswordFile -Raw).Trim() }
-    if (-not $Password) {
-        $s = Read-Host "Package password" -AsSecureString
-        $b = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($s)
-        try   { $Password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($b) }
-        finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b) }
+    if ($current -eq $latest -and (Test-AlreadyInstalled)) {
+        Write-Ok "Already on the latest version. Nothing to do."
+        return
     }
 
-    # ── 3. Download ─────────────────────────────────────────────────────────
-    $Work = Join-Path $env:WINDIR ("Temp\EID_MOHRE_" + [guid]::NewGuid())
-    New-Item -ItemType Directory $Work -Force | Out-Null
-    $bin = Join-Path $Work $AssetName
+    $asset = $release.assets | Where-Object { $_.name -eq $PKG_FILENAME } | Select-Object -First 1
+    if (-not $asset) { Write-Fatal "Release $latest does not contain $PKG_FILENAME" }
 
-    Write-Output "Downloading $AssetName ($([math]::Round($asset.size / 1MB, 1)) MB)"
-
-    # Build download headers - Accept must be octet-stream for the asset endpoint
-    $dh = @{}
-    foreach ($k in $h.Keys) { $dh[$k] = $h[$k] }
-    $dh["Accept"] = "application/octet-stream"
-
-    Invoke-WebRequestCompat -Uri $asset.url -Headers $dh -OutFile $bin
-
-    # ── 4. Verify + decrypt  (format: "EIDPK1" | salt16 | iv16 | ciphertext | hmac32) ──
-    $data = [IO.File]::ReadAllBytes($bin)
-    if ($data.Length -lt (6 + 16 + 16 + 16 + 32) -or
-        [Text.Encoding]::ASCII.GetString($data, 0, 6) -ne "EIDPK1") {
-        throw "Not a valid EID package file."
+    # ── STEP 2  Resolve the package key ──────────────────────────────────────
+    if ($KeyFile) { $PackageKey = (Get-Content $KeyFile -Raw).Trim() }
+    if (-not $PackageKey) {
+        $ss = Read-Host "Enter package key" -AsSecureString
+        $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($ss)
+        try   { $PackageKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+        finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
     }
 
-    $salt = New-Object byte[] 16; [Array]::Copy($data,  6, $salt, 0, 16)
-    $iv   = New-Object byte[] 16; [Array]::Copy($data, 22, $iv,   0, 16)
-    $bodyLen = $data.Length - 32
+    # ── STEP 3  Download ──────────────────────────────────────────────────────
+    $_tmpDir = Join-Path $env:WINDIR ("Temp\EIDdeploy_" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory $_tmpDir -Force | Out-Null
 
-    # PBKDF2-SHA256 key derivation (Win10 compatible with fallback)
-    $keys   = Invoke-Pbkdf2Sha256 -Password $Password -Salt $salt -Iterations 200000 -ByteCount 64
-    [byte[]]$encKey = $keys[0..31]
-    [byte[]]$macKey = $keys[32..63]
+    $pkgFile = Join-Path $_tmpDir $PKG_FILENAME
+    $sizeMB  = [math]::Round($asset.size / 1MB, 1)
+    Write-Step "Downloading $PKG_FILENAME ($sizeMB MB)..."
 
-    # Constant-time HMAC verify
-    $mac  = (New-Object Security.Cryptography.HMACSHA256(,$macKey)).ComputeHash($data, 0, $bodyLen)
-    $diff = 0
-    for ($i = 0; $i -lt 32; $i++) { $diff = $diff -bor ($mac[$i] -bxor $data[$bodyLen + $i]) }
-    if ($diff -ne 0) { throw "Wrong password (or the package is damaged)." }
+    $dlHdr = @{}; foreach ($k in $apiHdr.Keys) { $dlHdr[$k] = $apiHdr[$k] }
+    $dlHdr["Accept"] = "application/octet-stream"
+    Download-File -Url $asset.url -Headers $dlHdr -Out $pkgFile
+    Write-Ok "Download complete"
 
-    # Decrypt
+    # ── STEP 4  Verify & decrypt ──────────────────────────────────────────────
+    # Package format: "EIDPK1" (6) | salt (16) | IV (16) | AES-256-CBC ciphertext | HMAC-SHA256 (32)
+    Write-Step "Verifying package integrity..."
+    $raw     = [IO.File]::ReadAllBytes($pkgFile)
+    $magic   = [Text.Encoding]::ASCII.GetString($raw, 0, 6)
+    if ($magic -ne "EIDPK1") { Write-Fatal "Unrecognised package format (bad header)." }
+
+    $salt    = New-Object byte[] 16; [Array]::Copy($raw,  6, $salt, 0, 16)
+    $iv      = New-Object byte[] 16; [Array]::Copy($raw, 22, $iv,   0, 16)
+    $bodyEnd = $raw.Length - 32
+
+    $derived = Derive-Keys -Pass $PackageKey -Salt $salt -Rounds 200000 -Len 64
+    [byte[]] $encKey = $derived[0..31]
+    [byte[]] $macKey = $derived[32..63]
+
+    $computed = (New-Object Security.Cryptography.HMACSHA256 (,$macKey)).ComputeHash($raw, 0, $bodyEnd)
+    $mismatch = 0
+    for ($i = 0; $i -lt 32; $i++) { $mismatch = $mismatch -bor ($computed[$i] -bxor $raw[$bodyEnd + $i]) }
+    if ($mismatch -ne 0) { Write-Fatal "Package verification failed — wrong key or corrupted file." }
+
     $aes = [Security.Cryptography.Aes]::Create()
-    $aes.KeySize = 256; $aes.Mode = "CBC"; $aes.Padding = "PKCS7"
-    $aes.Key = $encKey; $aes.IV = $iv
-    $plain = $aes.CreateDecryptor().TransformFinalBlock($data, 38, $bodyLen - 38)
+    $aes.KeySize = 256; $aes.Mode = "CBC"; $aes.Padding = "PKCS7"; $aes.Key = $encKey; $aes.IV = $iv
+    $plainBytes = $aes.CreateDecryptor().TransformFinalBlock($raw, 38, $bodyEnd - 38)
 
-    $zip = Join-Path $Work "pkg.zip"
-    [IO.File]::WriteAllBytes($zip, $plain)
+    $zipFile   = Join-Path $_tmpDir "payload.zip"
+    $extractTo = Join-Path $_tmpDir "payload"
+    [IO.File]::WriteAllBytes($zipFile, $plainBytes)
+    if (Test-Path $extractTo) { Remove-Item $extractTo -Recurse -Force }
+    Expand-Archive -LiteralPath $zipFile -DestinationPath $extractTo -Force
+    Write-Ok "Package verified and extracted"
 
-    # Expand-Archive on PS 5.1: pre-remove destination to avoid partial-overwrite issues
-    $pkg = Join-Path $Work "pkg"
-    if (Test-Path $pkg) { Remove-Item $pkg -Recurse -Force -ErrorAction SilentlyContinue }
-    Expand-Archive -LiteralPath $zip -DestinationPath $pkg -Force
-    Write-Output "Package verified and decrypted."
+    # ── STEP 5  Remove existing installation ─────────────────────────────────
+    $msiFile = Get-ChildItem $extractTo -Filter *.msi | Select-Object -First 1
+    if (-not $msiFile) { Write-Fatal "No MSI found in package." }
+    $msiHash = (Get-FileHash $msiFile.FullName -Algorithm SHA256).Hash
 
-    # ── 5. Clean reinstall of "Emirates ID Card Toolkit Service" ONLY ───────
-    $msi = Get-ChildItem $pkg -Filter *.msi | Select-Object -First 1
-    if (-not $msi) { throw "This package has no MSI - cannot do a clean install." }
-    $msiHash = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash
-    Write-Output "Target folder: $TargetDir"
+    # Identify and protect services that are NOT ours
+    $others = @(Get-AllToolkitSvcs |
+                Where-Object { -not (Is-OurPath (Get-ExePath $_)) -and $_.DisplayName -ne $SVC_DISPLAY } |
+                Select-Object Name, DisplayName, PathName, StartMode, State)
+    foreach ($o in $others) { Write-Step "Preserving service: '$($o.DisplayName)'" }
 
-    # Remember other toolkit services so we can protect / restore them
-    $protect = @(Get-ToolkitServices |
-                 Where-Object { -not (Test-InTarget (Get-SvcExe $_)) -and
-                                $_.DisplayName -ne $ServiceDisp -and
-                                $_.Name -ne "ICAToolkitService" } |
-                 Select-Object Name, DisplayName, PathName, StartMode, State)
-    foreach ($o in $protect) {
-        Write-Output "Leaving untouched: '$($o.DisplayName)' ($($o.Name)) -> $($o.PathName)"
-    }
-
-    # Abort if the registered MSI is installed somewhere else (not our target)
-    $inst = Get-Installed
-    if ($inst) {
-        $regExe = Get-RegisteredExe $inst.PSChildName
-        if ($regExe -and -not (Test-InTarget $regExe)) {
-            throw ("The MSI is registered for $(Split-Path $regExe -Parent), not $TargetDir. " +
-                   "Uninstalling it would remove that install, so nothing was changed. " +
-                   "Remove it manually first if you want it replaced.")
+    # Abort if MSI is registered elsewhere
+    $existing = Find-InstalledMsi
+    if ($existing) {
+        $registeredExe = Get-MsiExePath $existing.PSChildName
+        if ($registeredExe -and -not (Is-OurPath $registeredExe)) {
+            Write-Fatal "This MSI is registered under a different folder ($(Split-Path $registeredExe -Parent)). Remove it manually first."
         }
     }
 
-    $emirates = @(Get-EmiratesServices)
-    if ($emirates -or (Test-Path $TargetDir) -or $inst -or (Test-ProductRegistered)) {
-        Write-Output "Existing 'Emirates ID Card Toolkit Service' found - removing it for a clean install"
+    $ourSvcs = @(Get-TargetSvcs)
+    if ($ourSvcs -or (Test-Path $INSTALL_DIR) -or $existing -or (Test-MsiRegistered)) {
+        Write-Step "Removing previous installation..."
 
-        # 5a. Back up config files
-        $old = Get-ChildItem $TargetDir -Filter "config_*" -File -ErrorAction SilentlyContinue
-        if ($old) {
-            $bak = Join-Path $env:ProgramData ("EID_MOHRE\backup_" + (Get-Date -Format "yyyyMMdd_HHmmss"))
-            New-Item -ItemType Directory $bak -Force | Out-Null
-            $old | Copy-Item -Destination $bak -Force
-            Write-Output "Old config files backed up to $bak"
+        # Back up config files
+        $cfgFiles = Get-ChildItem $INSTALL_DIR -Filter "config_*" -File -EA SilentlyContinue
+        if ($cfgFiles) {
+            $bakDir = Join-Path $BACKUP_ROOT ("cfg_" + (Get-Date -Format "yyyyMMdd_HHmmss"))
+            New-Item -ItemType Directory $bakDir -Force | Out-Null
+            $cfgFiles | Copy-Item -Destination $bakDir -Force
+            Write-Ok "Config backed up to $bakDir"
         }
 
-        # 5b. Stop + delete only the Emirates service(s)
-        foreach ($s in $emirates) {
-            Write-Output "Removing service '$($s.DisplayName)' ($($s.Name))"
-            Stop-Service -Name $s.Name -Force -ErrorAction SilentlyContinue
+        # Stop and delete our services
+        foreach ($s in $ourSvcs) {
+            Write-Step "Stopping service: $($s.Name)"
+            Stop-Service -Name $s.Name -Force -EA SilentlyContinue
             & sc.exe delete "$($s.Name)" | Out-Null
         }
-        Get-Process EIDAToolkitService -ErrorAction SilentlyContinue |
-            Where-Object { Test-InTarget $_.Path } | Stop-Process -Force
+        Get-Process $SVC_EXE_NAME.Replace(".exe","") -EA SilentlyContinue |
+            Where-Object { Is-OurPath $_.Path } | Stop-Process -Force
         Start-Sleep -Seconds 2
 
-        # 5c. Uninstall old MSI (with broken uninstall steps disabled)
-        if ($inst) { Invoke-CleanUninstall $inst.PSChildName; Start-Sleep -Seconds 3 }
-
-        # 5c2. Clear any leftover Windows Installer registration
-        if ((Test-ProductRegistered) -or (Get-Installed)) {
-            Write-Output "Old registration still present - cleaning it"
-            Remove-ProductRegistration
-        }
-
-        # 5d. Delete the target folder
-        if (Test-Path $TargetDir) {
-            Write-Output "Deleting $TargetDir"
-            Remove-Item $TargetDir -Recurse -Force -ErrorAction SilentlyContinue
+        if ($existing)           { Remove-OldInstall $existing.PSChildName; Start-Sleep -Seconds 3 }
+        if ((Test-MsiRegistered) -or (Find-InstalledMsi)) { Clear-MsiRegistration }
+        if (Test-Path $INSTALL_DIR) {
+            Write-Step "Removing $INSTALL_DIR"
+            Remove-Item $INSTALL_DIR -Recurse -Force -EA SilentlyContinue
         }
     } else {
-        Write-Output "No existing 'Emirates ID Card Toolkit Service' - fresh install"
+        Write-Step "No previous installation found — fresh install"
     }
 
-    # 5e. Fresh MSI install into the target folder
-    $log = "$env:WINDIR\Temp\EID_MOHRE-msi.log"
-    Write-Output "Installing $($msi.Name) to $TargetDir"
-    $msiArgs = "/i `"$($msi.FullName)`" INSTALLDIR=`"$TargetDir\`" /qn /norestart /L*v `"$log`""
-    $p = Start-Process msiexec.exe -ArgumentList $msiArgs -Wait -PassThru
-    if ($p.ExitCode -notin 0, 3010, 1641) {
-        throw "MSI install failed (exit $($p.ExitCode)). See $log"
-    }
+    # ── STEP 6  Install MSI ───────────────────────────────────────────────────
+    $msiLog = "$env:WINDIR\Temp\EIDToolkit-msi.log"
+    Write-Step "Installing $($msiFile.Name) → $INSTALL_DIR"
+    $args   = "/i `"$($msiFile.FullName)`" INSTALLDIR=`"$INSTALL_DIR\`" /qn /norestart /L*v `"$msiLog`""
+    $result = Start-Process msiexec.exe -ArgumentList $args -Wait -PassThru
+    if ($result.ExitCode -notin 0, 3010, 1641) { Write-Fatal "MSI install failed (code $($result.ExitCode)) — see $msiLog" }
     Start-Sleep -Seconds 5
-    if (-not (Test-Path (Join-Path $TargetDir "EIDAToolkitService.exe"))) {
-        throw "MSI finished but EIDAToolkitService.exe is not in $TargetDir. See $log"
+    if (-not (Test-Path (Join-Path $INSTALL_DIR $SVC_EXE_NAME))) {
+        Write-Fatal "MSI finished but $SVC_EXE_NAME was not found in $INSTALL_DIR — see $msiLog"
     }
+    Write-Ok "MSI installed successfully"
 
-    # 5f. Safety net: restore any protected service removed by the installer
-    foreach ($o in $protect) {
-        if (-not (Get-Service -Name $o.Name -ErrorAction SilentlyContinue)) {
-            Write-Warning "Service '$($o.Name)' was removed by the installer - restoring it"
-            $start = if ($o.StartMode -eq "Auto") { "auto" } elseif ($o.StartMode -eq "Disabled") { "disabled" } else { "demand" }
+    # Restore any protected service that the MSI may have removed
+    foreach ($o in $others) {
+        if (-not (Get-Service -Name $o.Name -EA SilentlyContinue)) {
+            Write-Warn "Restoring service '$($o.Name)' which was removed by the MSI"
+            $start = switch ($o.StartMode) { "Auto" {"auto"} "Disabled" {"disabled"} default {"demand"} }
             & sc.exe create "$($o.Name)" binPath= "$($o.PathName)" DisplayName= "$($o.DisplayName)" start= $start | Out-Null
-            if ($o.State -eq "Running") { Start-Service -Name $o.Name -ErrorAction SilentlyContinue }
+            if ($o.State -eq "Running") { Start-Service -Name $o.Name -EA SilentlyContinue }
         }
     }
 
-    # ── 6. Copy extra files from the package ────────────────────────────────
-    $pkgRoot = (Get-Item $pkg).FullName.TrimEnd('\')
+    # ── STEP 7  Copy extra files from the package ─────────────────────────────
+    $pkgRoot = (Get-Item $extractTo).FullName.TrimEnd('\')
     $mapFile = Join-Path $pkgRoot "copy-map.txt"
-    $jobs    = @()
+    $copyMap = @()
 
     if (Test-Path $mapFile) {
         foreach ($line in Get-Content $mapFile) {
             $line = $line.Trim()
             if (-not $line -or $line.StartsWith("#")) { continue }
-            $i = $line.IndexOf("=")
-            if ($i -lt 1) { throw "copy-map.txt: bad line '$line' (expected: item = destination folder)" }
-            $rel  = $line.Substring(0, $i).Trim().Trim('"').Trim('\', '/')
-            $dest = [Environment]::ExpandEnvironmentVariables($line.Substring($i + 1).Trim().Trim('"'))
-            $src  = [IO.Path]::GetFullPath((Join-Path $pkgRoot $rel))
-            if (-not $rel -or -not $src.StartsWith($pkgRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
-                throw "copy-map.txt: '$rel' is not inside the package"
-            }
-            if (-not (Test-Path $src)) { throw "copy-map.txt: '$rel' was not found in the package" }
-            if (-not $dest -or $dest.Contains('%') -or -not [IO.Path]::IsPathRooted($dest)) {
-                throw "copy-map.txt: destination for '$rel' must be a full path (got '$dest')"
-            }
-            $jobs += [pscustomobject]@{ Src = $src; Dest = $dest }
+            $sep  = $line.IndexOf("=")
+            if ($sep -lt 1) { Write-Fatal "copy-map.txt: invalid line — '$line'" }
+            $item = $line.Substring(0, $sep).Trim().Trim('"').Trim('\','/')
+            $dest = [Environment]::ExpandEnvironmentVariables($line.Substring($sep + 1).Trim().Trim('"'))
+            $src  = [IO.Path]::GetFullPath((Join-Path $pkgRoot $item))
+            if (-not $src.StartsWith($pkgRoot + '\', [StringComparison]::OrdinalIgnoreCase)) { Write-Fatal "copy-map.txt: '$item' escapes package root" }
+            if (-not (Test-Path $src))                                                        { Write-Fatal "copy-map.txt: '$item' not found in package" }
+            if (-not [IO.Path]::IsPathRooted($dest) -or $dest.Contains('%'))                  { Write-Fatal "copy-map.txt: destination must be a full path (got '$dest')" }
+            $copyMap += [pscustomobject]@{ Src = $src; Dest = $dest }
         }
     }
 
-    $svc = Get-TargetService
-    if ($svc -and $svc.State -eq "Running") {
-        Stop-Service -Name $svc.Name -Force; Start-Sleep -Seconds 2
+    $ourSvc = Get-OurService
+    if ($ourSvc -and $ourSvc.State -eq "Running") { Stop-Service -Name $ourSvc.Name -Force; Start-Sleep -Seconds 2 }
+
+    function Copy-OneFile([string]$From, [string]$To) {
+        New-Item -ItemType Directory (Split-Path $To -Parent) -Force | Out-Null
+        Copy-Item -LiteralPath $From -Destination $To -Force
+        Write-Host "    + $To" -ForegroundColor DarkGray
     }
 
-    $copyOne = {
-        param([string]$from, [string]$to)
-        New-Item -ItemType Directory (Split-Path $to -Parent) -Force | Out-Null
-        Copy-Item -LiteralPath $from -Destination $to -Force
-        Write-Output "Installed $to"
-    }
-
-    # 6a. Files not in copy-map -> target folder
+    # Files not in copy-map → install folder
     foreach ($f in Get-ChildItem $pkgRoot -File -Recurse) {
-        if ($f.FullName -eq $mapFile) { continue }
+        if ($f.FullName -eq $mapFile)                                   { continue }
         if ($f.DirectoryName -eq $pkgRoot -and $f.Extension -eq ".msi") { continue }
-        $isMapped = $false
-        foreach ($j in $jobs) {
-            if ($f.FullName -eq $j.Src -or
-                $f.FullName.StartsWith($j.Src + '\', [StringComparison]::OrdinalIgnoreCase)) {
-                $isMapped = $true; break
+        $mapped = $false
+        foreach ($m in $copyMap) {
+            if ($f.FullName -eq $m.Src -or $f.FullName.StartsWith($m.Src + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                $mapped = $true; break
             }
         }
-        if ($isMapped) { continue }
-        & $copyOne $f.FullName (Join-Path $TargetDir $f.FullName.Substring($pkgRoot.Length + 1))
+        if (-not $mapped) { Copy-OneFile $f.FullName (Join-Path $INSTALL_DIR $f.FullName.Substring($pkgRoot.Length + 1)) }
     }
 
-    # 6b. Files in copy-map -> their own destination
-    foreach ($j in $jobs) {
-        if (Test-Path $j.Src -PathType Container) {
-            foreach ($f in Get-ChildItem $j.Src -File -Recurse) {
-                & $copyOne $f.FullName (Join-Path $j.Dest $f.FullName.Substring($j.Src.Length + 1))
+    # Files in copy-map → their own destinations
+    foreach ($m in $copyMap) {
+        if (Test-Path $m.Src -PathType Container) {
+            Get-ChildItem $m.Src -File -Recurse | ForEach-Object {
+                Copy-OneFile $_.FullName (Join-Path $m.Dest $_.FullName.Substring($m.Src.Length + 1))
             }
         } else {
-            & $copyOne $j.Src (Join-Path $j.Dest (Split-Path $j.Src -Leaf))
+            Copy-OneFile $m.Src (Join-Path $m.Dest (Split-Path $m.Src -Leaf))
         }
     }
 
-    # ── 7. Service: register, name, start ───────────────────────────────────
-    $svc = Get-TargetService
-    if (-not $svc) {
-        Write-Output "Registering the toolkit service"
-        Start-Process (Join-Path $TargetDir "EIDAToolkitService.exe") `
-                      -ArgumentList "-install" -WorkingDirectory $TargetDir `
-                      -Wait -WindowStyle Hidden
+    # ── STEP 8  Register & start the service ──────────────────────────────────
+    $ourSvc = Get-OurService
+    if (-not $ourSvc) {
+        Write-Step "Self-registering toolkit service..."
+        Start-Process (Join-Path $INSTALL_DIR $SVC_EXE_NAME) -ArgumentList "-install" `
+                      -WorkingDirectory $INSTALL_DIR -Wait -WindowStyle Hidden
         Start-Sleep -Seconds 3
-        $svc = Get-TargetService
+        $ourSvc = Get-OurService
     }
-    if (-not $svc) { throw "Toolkit service was not created. Check $TargetDir" }
+    if (-not $ourSvc) { Write-Fatal "Service was not created. Check $INSTALL_DIR" }
 
-    & sc.exe config      "$($svc.Name)" DisplayName= "$ServiceDisp" start= auto | Out-Null
-    & sc.exe description "$($svc.Name)" "$ServiceDisp"                           | Out-Null
+    & sc.exe config      "$($ourSvc.Name)" DisplayName= "$SVC_DISPLAY" start= auto | Out-Null
+    & sc.exe description "$($ourSvc.Name)" "$SVC_DISPLAY"              | Out-Null
 
-    $other = Get-Service ICAToolkit -ErrorAction SilentlyContinue
-    if ($other -and $other.Status -eq "Running") {
-        Write-Warning "ICAToolkit (old toolkit) is also running. Both use the same agent, so only ONE can work at a time."
+    $conflict = Get-Service ICAToolkit -EA SilentlyContinue
+    if ($conflict -and $conflict.Status -eq "Running") {
+        Write-Warn "ICAToolkit service is also running — only one instance can be active at a time."
     }
 
     try {
-        Start-Service -Name $svc.Name
+        Start-Service -Name $ourSvc.Name
         Start-Sleep -Seconds 3
-        $state = (Get-Service -Name $svc.Name).Status
-        Write-Output "Service '$ServiceDisp' (name: $($svc.Name)) is $state - $TargetDir"
+        $status = (Get-Service -Name $ourSvc.Name).Status
+        Write-Ok "Service '$SVC_DISPLAY' is $status"
     } catch {
-        Write-Warning "Installed, but '$ServiceDisp' could not start: $($_.Exception.Message)"
+        Write-Warn "Service installed but could not start: $($_.Exception.Message)"
     }
 
-    # ── 8. Record installed version ─────────────────────────────────────────
-    New-Item $RegKey -Force | Out-Null
-    Set-ItemProperty $RegKey -Name Version -Value $tag
-    if ($msi) { Set-ItemProperty $RegKey -Name MsiHash -Value $msiHash }
-    Set-ItemProperty $RegKey -Name Updated -Value (Get-Date -Format "yyyy-MM-dd HH:mm")
-    Write-Output "Done: EID Toolkit $tag installed."
+    # ── STEP 9  Record version ────────────────────────────────────────────────
+    New-Item $REG_PATH -Force | Out-Null
+    Set-ItemProperty $REG_PATH -Name Version -Value $latest
+    Set-ItemProperty $REG_PATH -Name MsiHash -Value $msiHash
+    Set-ItemProperty $REG_PATH -Name Updated -Value (Get-Date -Format "yyyy-MM-dd HH:mm")
+    Set-ItemProperty $REG_PATH -Name InstallDir -Value $INSTALL_DIR
+
+    Write-Host ""
+    Write-Host "  ✔  EID Toolkit $latest deployed to $INSTALL_DIR" -ForegroundColor Green
+    Write-Host ""
 }
 catch {
-    Write-Output "ERROR: $($_.Exception.Message)"
+    Write-Host ""
+    Write-Host "  ✘  ERROR: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "     Log: $LOG_FILE" -ForegroundColor Red
+    Write-Host ""
     $global:LASTEXITCODE = 1
 }
 finally {
-    $Password = $null
-    if ($Work -and (Test-Path $Work)) {
-        Remove-Item $Work -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    if ($transcriptStarted) { try { Stop-Transcript | Out-Null } catch { } }
+    $PackageKey = $null
+    if ($_tmpDir -and (Test-Path $_tmpDir)) { Remove-Item $_tmpDir -Recurse -Force -EA SilentlyContinue }
+    if ($_transcriptOn) { try { Stop-Transcript | Out-Null } catch { } }
 }
