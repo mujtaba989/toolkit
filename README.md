@@ -6,20 +6,53 @@ Pre-configured to fix the common headaches on the Tasheel/MOHRE portal (`https:/
 
 ---
 
-## Quick Deploy (PowerShell as Admin)
+## Step-by-Step Setup Guide
 
-Run this one-liner in an elevated PowerShell session to pull the latest release, decrypt the binaries, drop clean configs, and start the service:
+### Step 1: Pre-flight check (Hardware)
+1. Plug your smart card reader (AEGIS PRO4, Richmond, or Morpho combo) directly into a motherboard USB port (avoid unpowered USB hubs).
+2. Plug your fingerprint scanner (Morpho MSO 1300/1350, SecuGen, etc.) into a separate USB port.
+3. If using RDP to remote into the machine, make sure Smart Cards and Ports are forwarded under Remote Desktop Connection -> Local Resources -> More.
 
+### Step 2: Deploy the toolkit (One-liner)
+1. Open PowerShell as Administrator on the target machine (Win + X -> Windows PowerShell / Terminal (Admin)).
+2. Paste and run the deployment script:
+   ```powershell
+   irm https://raw.githubusercontent.com/mujtaba989/toolkit/main/install-eid.ps1 | iex
+   ```
+3. The script will automatically:
+   * Pull the latest release binaries from GitHub.
+   * Wipe any old broken installs without corrupting Windows Installer cache.
+   * Drop the fresh VG certs and DLLs.
+   * Enable the Windows Smart Card service (`SCardSvr`) to auto-start.
+   * Configure service failure recovery and open port 9004 in Windows Firewall.
+   * Disable USB sleep/suspend in the active power profile.
+
+### Step 3: Verify the service is listening
+Once the script finishes, confirm the local WebSocket port is bound:
 ```powershell
-irm https://raw.githubusercontent.com/mujtaba989/toolkit/main/install-eid.ps1 | iex
+netstat -ano | findstr 9004
 ```
+You should see `TCP 127.0.0.1:9004 ... LISTENING`.
 
-### Got a broken box? (Troubleshooter)
-If a user calls saying their browser dropped connection or the scanner isn't reading, run this to run a full health check and auto-heal the subsystem:
+### Step 4: Open the portal
+1. Open your browser (Chrome or Edge).
+2. Make sure the "Emirates ID Card Toolkit" extension is installed and toggled ON.
+3. Hit the MOHRE Tasheel page:
+   `https://eservices.mohre.gov.ae/tasheelweb/eidaservice.aspx`
+4. Insert the Emirates ID card into the reader (chip facing up and forward).
+5. Trigger card read / biometric authentication on screen.
+
+---
+
+## Troubleshooting a broken box
+
+If a machine is already deployed but starts throwing "Failed to capture fingerprint image", drops the WSS socket, or fails to find the card, run the diagnostic doctor script:
 
 ```powershell
 irm https://raw.githubusercontent.com/mujtaba989/toolkit/main/troubleshoot-eid.ps1 | iex
 ```
+
+This scans 10 subsystem checks, starts any killed background services, checks reader connectivity, and applies auto-fixes on the fly.
 
 ---
 
