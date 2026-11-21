@@ -242,8 +242,11 @@ function Remove-OldInstall([string]$prodCode) {
 
     $ulog = "$env:WINDIR\Temp\EIDToolkit-uninstall.log"
     $p = Start-Process msiexec.exe -ArgumentList "/x $prodCode /qn /norestart /L*v `"$ulog`"" -Wait -PassThru
-    if ($p.ExitCode -notin 0,3010,1605) { Write-Fatal "Uninstall failed (code $($p.ExitCode)) — see $ulog" }
-    Write-Ok "Previous version removed"
+    if ($p.ExitCode -notin 0, 3010, 1605, 1603) {
+        Write-Warn "MSI uninstall returned code $($p.ExitCode). Proceeding with forced cleanup."
+    }
+    Clear-MsiRegistration
+    Write-Ok "Previous installation cleaned up"
 }
 
 # Scrub every Windows Installer registration for the product
