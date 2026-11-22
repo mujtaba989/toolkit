@@ -294,6 +294,30 @@ function Clear-MsiRegistration {
     Write-Ok "Cleared $n stale installer registration(s)  (backup: $bk)"
 }
 
+# Remove any previous daemon / watchdog scheduled tasks and script files
+function Remove-PreviousWatchdogs {
+    $watchdogTasks = @("EIDToolkit-Watchdog", "EID_MOHRE-Watchdog", "ToolkitWatchdog")
+    foreach ($tn in $watchdogTasks) {
+        & schtasks.exe /delete /tn "$tn" /f 2>$null | Out-Null
+    }
+
+    # Also query any wildcard matches via PowerShell
+    Get-ScheduledTask -EA SilentlyContinue |
+        Where-Object { $_.TaskName -like "*EIDToolkit*" -or $_.TaskName -like "*EID_MOHRE*" -or $_.TaskName -like "*Watchdog*" } |
+        ForEach-Object { Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -EA SilentlyContinue }
+
+    # Purge old daemon script files and logs
+    $oldFiles = @(
+        "$env:ProgramData\EIDToolkit\watchdog.ps1",
+        "$env:ProgramData\EID_MOHRE\watchdog.ps1",
+        "$env:WINDIR\Temp\EIDToolkit-watchdog.log",
+        "$env:WINDIR\Temp\EID_MOHRE-watchdog.log"
+    )
+    foreach ($f in $oldFiles) {
+        if (Test-Path $f) { Remove-Item $f -Force -EA SilentlyContinue }
+    }
+}
+
 # Ensure all system prerequisites and Visual C++ runtimes are installed
 function Ensure-Dependencies([string]$TempDir) {
     Write-Step "Checking system runtime dependencies..."
@@ -412,6 +436,10 @@ try {
                 if (Test-Path $REG_PATH) {
                     Remove-Item $REG_PATH -Recurse -Force -EA SilentlyContinue
                 }
+
+                # Completely remove any background daemon / watchdog tasks
+                Remove-PreviousWatchdogs
+                Write-Step "Removed all background watchdog daemons and scheduled tasks"
 
                 Write-Host ""
                 Write-Host "  ================================================================" -ForegroundColor Cyan
@@ -579,7 +607,13 @@ try {
             Write-Step "Removing $INSTALL_DIR"
             Remove-Item $INSTALL_DIR -Recurse -Force -EA SilentlyContinue
         }
+
+        # Purge any stale legacy daemon / watchdog tasks before fresh install
+        Remove-PreviousWatchdogs
+        Write-Step "Purged previous daemon and watchdog tasks"
     } else {
+        # Fresh install path: ensure no orphan watchdog tasks are lingering
+        Remove-PreviousWatchdogs
         Write-Step "No previous installation found - fresh install"
     }
 

@@ -62,9 +62,9 @@ Write-Host "  ==============================================================" -F
 Write-Host "  Target: https://eservices.mohre.gov.ae/tasheelweb/eidaservice.aspx" -ForegroundColor DarkGray
 Write-Host ""
 
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 Title "1. SERVICE STATE"
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 if (-not $svc) {
     Fail "Emirates ID Card Toolkit Service not found - run install-eid.ps1 first"
     $issues.Add("Service not installed") | Out-Null
@@ -91,9 +91,9 @@ if (-not $svc) {
     }
 }
 
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 Title "2. ROOT CAUSE - EXPIRED VG CERTIFICATE (causes WSS drops)"
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 if ($svcDir) {
     $latestLog = Get-ChildItem $svcDir -Filter "*.log" -EA SilentlyContinue |
                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -102,18 +102,13 @@ if ($svcDir) {
         $logText = Get-Content $latestLog.FullName -Raw -EA SilentlyContinue
         Info "Analysing: $($latestLog.Name)"
 
-        # Cert expired - the #1 WSS drop cause on this machine
+        # Cert expired - check specifically for expiration error
         if ($logText -match "certificate has expired") {
             Fail "EXPIRED VG CERTIFICATE detected"
             Fail "Sequence: cert expired -> toolkit won't init -> service stops -> browser WSS drops"
-            Fail "This has been happening since: $(
-                (Get-ChildItem $svcDir -Filter '*.log' | Sort-Object Name |
-                 Where-Object { (Get-Content $_.FullName -Raw) -match 'certificate has expired' } |
-                 Select-Object -First 1).Name
-            )"
             $issues.Add("VG signing certificate expired - PRIMARY cause of WSS drops") | Out-Null
             Info "Fix: re-run install-eid.ps1 to replace config_vg_prod with the fresh cert"
-        } elseif ($logText -match "cert") {
+        } elseif ($logText -match "certificate.*(failed|invalid|error)") {
             Warn "Certificate warning in log - check manually"
         } else {
             Ok "No certificate errors in latest log"
@@ -146,9 +141,9 @@ if ($svcDir) {
     }
 }
 
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 Title "3. SERVICE RECOVERY (auto-restart on crash)"
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 # Check current failure actions via sc.exe qfailure
 $qf = & sc.exe qfailure "$svcName" 2>$null | Out-String
 if ($qf -match "RESTART -- Delay") {
@@ -164,9 +159,9 @@ if ($qf -match "RESTART -- Delay") {
     }
 }
 
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 Title "4. WATCHDOG SCHEDULED TASK"
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 # A watchdog catches the case where the service 'runs' but binds no port
 $taskName = "EIDToolkit-Watchdog"
 $existing = Get-ScheduledTask -TaskName $taskName -EA SilentlyContinue
@@ -179,9 +174,9 @@ if ($existing) {
     $issues.Add("No watchdog scheduled task") | Out-Null
 
     if (-not $ReportOnly -and $svcName) {
-        # Find the port the toolkit uses by checking config_ag
+        # Find the port the toolkit uses (MOHRE default is 9004)
         $cfgAg   = Join-Path $svcDir "config_ag"
-        $portNum = 7050   # default fallback
+        $portNum = 9004   # default MOHRE / Tasheel port
         if (Test-Path $cfgAg) {
             $cfgText = Get-Content $cfgAg -Raw -EA SilentlyContinue
             $pm = [regex]::Match($cfgText, '"port"\s*:\s*(\d+)')
@@ -240,9 +235,9 @@ if (-not `$portUp) {
     }
 }
 
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 Title "5. USB SELECTIVE SUSPEND (device sleeps mid-session)"
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 # Biometric / smart-card USB devices going to sleep break the WSS mid-capture
 $bioDev = Get-PnpDevice -EA SilentlyContinue | Where-Object {
     $_.Class -like "*Biometric*" -or $_.Class -like "*SmartCard*" -or
@@ -288,9 +283,9 @@ if ($bioDev) {
     $issues.Add("Fingerprint device not connected") | Out-Null
 }
 
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 Title "6. SMART CARD SERVICE"
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 $scSvc = Get-Service SCardSvr -EA SilentlyContinue
 if (-not $scSvc) {
     Fail "Smart Card service (SCardSvr) not found"
@@ -311,10 +306,10 @@ if (-not $scSvc) {
     Ok "Smart Card service (SCardSvr) is Running"
 }
 
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 Title "7. TOOLKIT PORT (WSS endpoint)"
-# ════════════════════════════════════════════════════════════════════════════
-$toolkitPorts = @(7050,7051,7052,7053,7054,8443,8080)
+# ----------------------------------------------------------------------------
+$toolkitPorts = @(9004, 9005, 9006, 9020, 7050, 7051, 8443, 8080)
 $activePort   = $null
 foreach ($p in $toolkitPorts) {
     $hit = netstat -ano 2>$null | Select-String "(?:0\.0\.0\.0|127\.0\.0\.1):$p\s" |
@@ -330,9 +325,9 @@ if ($activePort) {
     $issues.Add("Toolkit port not listening") | Out-Null
 }
 
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 Title "8. FIREWALL"
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 $fwRules = Get-NetFirewallRule -EA SilentlyContinue |
            Where-Object { $_.DisplayName -like "*Emirates*" -or $_.DisplayName -like "*EIDA*" -or
                           $_.DisplayName -like "*EIDToolkit*" }
@@ -353,9 +348,9 @@ if ($fwRules) {
     }
 }
 
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 Title "9. VC++ 2013 RUNTIME"
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 $vc = Get-ItemProperty "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
                        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*" -EA SilentlyContinue |
      Where-Object { $_.DisplayName -like "Microsoft Visual C++ 2013*" }
@@ -377,9 +372,9 @@ if ($vc) {
     }
 }
 
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 Title "10. BROWSER EXTENSION CHECK"
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 Info "The MOHRE page requires the 'Emirates ID Card Toolkit' browser extension"
 Info "Chrome : chrome://extensions   |   Edge: edge://extensions"
 Info "Look for: 'Emirates ID Card Toolkit' or 'ICA Toolkit' - must be ENABLED"
@@ -390,9 +385,9 @@ $edgeExtDir   = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Extensions"
 if (Test-Path $chromeExtDir) { Info "Chrome extensions folder found" }
 if (Test-Path $edgeExtDir)   { Info "Edge extensions folder found" }
 
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 #  RESTART SERVICE (after all fixes)
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 if (-not $ReportOnly -and $svcName) {
     $currentState = (Get-Service -Name $svcName -EA SilentlyContinue).Status
     if ($currentState -ne "Running") {
@@ -407,13 +402,13 @@ if (-not $ReportOnly -and $svcName) {
     }
 }
 
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 #  SUMMARY
-# ════════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------------
 Write-Host ""
-Write-Host "  ═══════════════════════════════════════════════════════════════" -ForegroundColor DarkGray
+Write-Host "  ---------------------------------------------------------------" -ForegroundColor DarkGray
 Write-Host "  SUMMARY" -ForegroundColor Yellow
-Write-Host "  ═══════════════════════════════════════════════════════════════" -ForegroundColor DarkGray
+Write-Host "  ---------------------------------------------------------------" -ForegroundColor DarkGray
 
 if ($issues.Count -eq 0) {
     Write-Host "  No issues found!" -ForegroundColor Green
