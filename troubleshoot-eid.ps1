@@ -408,17 +408,32 @@ if ($vc) {
 }
 
 # ----------------------------------------------------------------------------
-Title "10. BROWSER EXTENSION CHECK"
+Title "10. BIOMETRIC SENSOR PRIVACY (AEGIS / AGF200)"
 # ----------------------------------------------------------------------------
-Info "The MOHRE page requires the 'Emirates ID Card Toolkit' browser extension"
-Info "Chrome : chrome://extensions   |   Edge: edge://extensions"
-Info "Look for: 'Emirates ID Card Toolkit' or 'ICA Toolkit' - must be ENABLED"
-Info "If missing: install from your IT admin or re-run the MOHRE page - it may prompt you"
+# On Windows 10/11, optical fingerprint sensors (e.g. AGF200) use the UVC/Camera subsystem.
+# If camera privacy is restricted, biometric capture fails with Error#50.
+$camVal = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam" -Name "Value" -EA SilentlyContinue).Value
+$polVal = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy" -Name "LetAppsAccessCamera" -EA SilentlyContinue).LetAppsAccessCamera
 
-$chromeExtDir = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Extensions"
-$edgeExtDir   = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Extensions"
-if (Test-Path $chromeExtDir) { Info "Chrome extensions folder found" }
-if (Test-Path $edgeExtDir)   { Info "Edge extensions folder found" }
+if ($camVal -eq "Deny" -or $polVal -eq 2) {
+    Warn "Camera access is restricted in Windows Privacy - optical biometric capture will fail (Error#50)"
+    $issues.Add("Camera privacy is blocking optical fingerprint sensor") | Out-Null
+    if (-not $ReportOnly) {
+        $camPaths = @(
+            "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam",
+            "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam"
+        )
+        foreach ($cp in $camPaths) {
+            if (-not (Test-Path $cp)) { New-Item -Path $cp -Force -EA SilentlyContinue | Out-Null }
+            Set-ItemProperty $cp -Name "Value" -Value "Allow" -EA SilentlyContinue
+        }
+        Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy" -Name "LetAppsAccessCamera" -Value 1 -Type DWord -EA SilentlyContinue
+        Fixed "Allowed camera/optical sensor access in Windows privacy settings"
+        $fixes.Add("Enabled camera/sensor privacy permissions") | Out-Null
+    }
+} else {
+    Ok "Camera and optical sensor privacy permissions are Allowed"
+}
 
 # ----------------------------------------------------------------------------
 #  RESTART SERVICE (after all fixes)
@@ -449,7 +464,7 @@ if ($issues.Count -eq 0) {
     Write-Host "  No issues found!" -ForegroundColor Green
     Write-Host "  If WSS still drops on the MOHRE page:" -ForegroundColor White
     Write-Host "    1. Hard-reload the page (Ctrl+Shift+R)" -ForegroundColor White
-    Write-Host "    2. Confirm extension is enabled in browser" -ForegroundColor White
+    Write-Host "    2. Confirm smart card is inserted firmly with chip facing up" -ForegroundColor White
     Write-Host "    3. Try Edge instead of Chrome (or vice versa)" -ForegroundColor White
     Write-Host "    4. Disable browser hardware acceleration" -ForegroundColor White
 } else {

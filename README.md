@@ -41,11 +41,10 @@ Expected output: `TCP 127.0.0.1:9004 ... LISTENING`.
 
 ### Step 4: Open MOHRE Tasheel Portal
 1. Open Google Chrome or Microsoft Edge.
-2. Confirm the "Emirates ID Card Toolkit" extension is installed and active.
-3. Access the MOHRE Tasheel portal:
+2. Access the MOHRE Tasheel portal:
    `https://eservices.mohre.gov.ae/tasheelweb/eidaservice.aspx`
-4. Insert the Emirates ID card into the card reader (chip facing up and forward).
-5. Execute card reading and biometric authentication when prompted.
+3. Insert the Emirates ID card into the card reader (chip facing up and forward).
+4. Execute card reading and biometric authentication when prompted.
 
 ---
 
