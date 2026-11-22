@@ -768,9 +768,9 @@ if (-not `$portUp) {
 
         # Use native schtasks.exe (100% universal across Windows 10 & 11 without CIM/PowerShell type-binding quirks)
         $taskCmd = "powershell.exe -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"$wdPath\`""
-        $res = & schtasks.exe /create /tn "$taskName" /tr "$taskCmd" /sc minute /mo 2 /ru "SYSTEM" /rl HIGHEST /f 2>&1
+        $res = & schtasks.exe /create /tn "$taskName" /tr "$taskCmd" /sc minute /mo 1 /ru "SYSTEM" /rl HIGHEST /f 2>&1
         if ($LASTEXITCODE -eq 0) {
-            Write-Ok "Daemon watchdog installed (monitors service & port 9004 every 2 minutes across Windows 10 & 11)"
+            Write-Ok "Daemon watchdog installed (monitors service & port 9004 every 1 minute across Windows 10 & 11)"
         } else {
             # Fallback to PowerShell ScheduledTask cmdlet
             $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$wdPath`""
