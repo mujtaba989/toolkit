@@ -27,7 +27,7 @@ Disclaimer: This tool is strictly developed for administrative convenience and t
    * Step 3: Downloads the package with integrity verification.
    * Step 4: Verifies AES-256 and HMAC-SHA256 package authenticity.
    * Step 5: Cleans prior broken MSI/registry state without touching third-party services.
-   * Step 6: Installs the official core MSI service package.
+   * Step 6: Verifies system runtime prerequisites (auto-installs Microsoft Visual C++ 2013 & 2015-2022 runtimes if missing) and installs the official core MSI service package.
    * Step 7: Deploys updated runtime DLLs and automatically syncs live certificates and configs directly from MOHRE official server (`EmiratesIDCardToolkitService_64.zip`).
    * Step 8: Configures service recovery, auto-starts `SCardSvr`, enables firewall access, and disables USB selective suspend.
    * Step 9: Records version registration and verifies port status.

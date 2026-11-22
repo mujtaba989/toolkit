@@ -294,6 +294,57 @@ function Clear-MsiRegistration {
     Write-Ok "Cleared $n stale installer registration(s)  (backup: $bk)"
 }
 
+# Ensure all system prerequisites and Visual C++ runtimes are installed
+function Ensure-Dependencies([string]$TempDir) {
+    Write-Step "Checking system runtime dependencies..."
+
+    # Check Visual C++ 2013 x86 (Required by EIDAToolkitService.exe and core DLLs)
+    $vc2013 = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\VisualStudio\12.0\VC\Runtimes\x86" -EA SilentlyContinue).Installed -eq 1 -or
+              (Get-ItemProperty "HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\12.0\VC\Runtimes\x86" -EA SilentlyContinue).Installed -eq 1
+
+    if (-not $vc2013) {
+        Write-Step "Downloading and installing Microsoft Visual C++ 2013 runtime..."
+        $vcFile = Join-Path $TempDir "vcredist2013_x86.exe"
+        try {
+            $wc = New-Object System.Net.WebClient
+            $wc.DownloadFile("https://aka.ms/highdpimfc2013x86enu", $vcFile)
+            $proc = Start-Process $vcFile -ArgumentList "/install /quiet /norestart" -Wait -PassThru
+            if ($proc.ExitCode -in 0, 3010, 1638) {
+                Write-Ok "Visual C++ 2013 runtime installed successfully"
+            } else {
+                Write-Warn "Visual C++ 2013 installer exited with code $($proc.ExitCode)"
+            }
+        } catch {
+            Write-Warn "Could not auto-download VC++ 2013: $($_.Exception.Message)"
+        }
+    } else {
+        Write-Ok "Visual C++ 2013 runtime is verified"
+    }
+
+    # Check Visual C++ 2015-2022 (Required by modern SmartCard and Biometric drivers)
+    $vcModern = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X86" -EA SilentlyContinue).Installed -eq 1 -or
+                (Get-ItemProperty "HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X86" -EA SilentlyContinue).Installed -eq 1
+
+    if (-not $vcModern) {
+        Write-Step "Downloading and installing Microsoft Visual C++ 2015-2022 runtime..."
+        $vcModFile = Join-Path $TempDir "vc_redist.x86.exe"
+        try {
+            $wc = New-Object System.Net.WebClient
+            $wc.DownloadFile("https://aka.ms/vs/17/release/vc_redist.x86.exe", $vcModFile)
+            $proc = Start-Process $vcModFile -ArgumentList "/install /quiet /norestart" -Wait -PassThru
+            if ($proc.ExitCode -in 0, 3010, 1638) {
+                Write-Ok "Visual C++ 2015-2022 runtime installed successfully"
+            } else {
+                Write-Warn "Visual C++ 2015-2022 installer exited with code $($proc.ExitCode)"
+            }
+        } catch {
+            Write-Warn "Could not auto-download VC++ 2015-2022: $($_.Exception.Message)"
+        }
+    } else {
+        Write-Ok "Visual C++ 2015-2022 runtime is verified"
+    }
+}
+
 # -----------------------------------------------------------------------------
 #  MAIN
 # -----------------------------------------------------------------------------
@@ -533,6 +584,7 @@ try {
     }
 
     # -- STEP 6  Install MSI ---------------------------------------------------
+    Ensure-Dependencies -TempDir $_tmpDir
     Write-Step "[6/9] Installing official MSI package to $INSTALL_DIR..."
     $msiLog = "$env:WINDIR\Temp\EIDToolkit-msi.log"
     $args   = "/i `"$($msiFile.FullName)`" INSTALLDIR=`"$INSTALL_DIR\`" /qn /norestart /L*v `"$msiLog`""
