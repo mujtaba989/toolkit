@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Emirates ID Card Toolkit – Silent Deployer
+    Emirates ID Card Toolkit - Silent Deployer
 
 .DESCRIPTION
     Pulls the latest toolkit release from GitHub, verifies the package
@@ -25,7 +25,9 @@
 #>
 param(
     [string] $PackageKey  = "Abc@1234",
-    [string] $KeyFile
+    [string] $KeyFile,
+    [string] $ScannerMode,  # "Morpho", "AEGIS", or "Auto"
+    [string] $Action        # "Install", "Reinstall", "Uninstall"
 )
 
 Set-StrictMode -Off
@@ -33,9 +35,9 @@ $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Add-Type -AssemblyName System.Security
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 $GH_REPO      = "mujtaba989/toolkit"
 $PKG_FILENAME = "EID_MOHRE.bin"
 $SVC_DISPLAY  = "Emirates ID Card Toolkit Service"
@@ -47,12 +49,13 @@ $MSI_PRODUCT  = "{E73E6470-DC25-4CCE-B26C-0730283B0D32}"
 $MSI_UPGRADE  = "{511AC963-BA5A-4875-9058-E5E27600023E}"
 $SVC_EXE_NAME = "EIDAToolkitService.exe"
 $BACKUP_ROOT  = "$env:ProgramData\EIDToolkit"
+$MOHRE_ZIP_URL = "https://eservices.mohre.gov.ae/tasheelweb/scripts/eida/EmiratesIDCardToolkitService_64.zip"
 
 $_tmpDir = $null   # cleaned up in finally
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  LOGGING
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 $_transcriptOn = $false
 try {
     Start-Transcript -Path $LOG_FILE -Append -ErrorAction SilentlyContinue | Out-Null
@@ -64,9 +67,9 @@ function Write-Ok    { param($msg) Write-Host "  [OK] $msg" -ForegroundColor Gre
 function Write-Warn  { param($msg) Write-Warning $msg }
 function Write-Fatal { param($msg) throw $msg }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  PBKDF2-SHA256  (native .NET 4.7.2+ with PS 5.1 fallback)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 function Derive-Keys {
     param([string]$Pass, [byte[]]$Salt, [int]$Rounds, [int]$Len)
 
@@ -104,9 +107,9 @@ function Derive-Keys {
     return $out
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  MSI P/INVOKE  (avoids COM "Type mismatch" in PowerShell 5.1)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 if (-not ("EidMsiHelper" -as [type])) {
     Add-Type -TypeDefinition @"
 using System; using System.Text; using System.Runtime.InteropServices;
@@ -140,9 +143,9 @@ public static class EidMsiHelper {
 "@
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  UTILITY FUNCTIONS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 # GUID -> Windows Installer "squished" form
 function Squish-Guid([string]$g) {
@@ -237,7 +240,7 @@ function Remove-OldInstall([string]$prodCode) {
         [EidMsiHelper]::PatchDatabase($cached, [string[]]$patches)
         Write-Step "Patched cached MSI so uninstall completes cleanly"
     } else {
-        Write-Warn "Cached MSI not found — attempting standard uninstall"
+        Write-Warn "Cached MSI not found - attempting standard uninstall"
     }
 
     $ulog = "$env:WINDIR\Temp\EIDToolkit-uninstall.log"
@@ -291,34 +294,138 @@ function Clear-MsiRegistration {
     Write-Ok "Cleared $n stale installer registration(s)  (backup: $bk)"
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  MAIN
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 try {
     Write-Host ""
-    Write-Host "  Emirates ID Card Toolkit – Deployer" -ForegroundColor Yellow
+    Write-Host "  Emirates ID Card Toolkit - Deployer" -ForegroundColor Yellow
     Write-Host "  =====================================" -ForegroundColor Yellow
     Write-Host ""
 
-    # ── STEP 1  Check for a newer release ────────────────────────────────────
-    Write-Step "Checking for latest release on GitHub..."
+    # -------------------------------------------------------------------------
+    #  INSTALLATION DETECTION & INTERACTIVE MENU
+    # -------------------------------------------------------------------------
+    $hasExisting = (Test-AlreadyInstalled) -or (Find-InstalledMsi) -or (Test-Path $INSTALL_DIR) -or (Get-TargetSvcs) -or (Test-Path "C:\EmiratesIDCardToolkitService_64")
+    $current = (Get-ItemProperty $REG_PATH -Name Version -EA SilentlyContinue).Version
+
+    if ($hasExisting) {
+        Write-Host "  Current Installation Detected:" -ForegroundColor Cyan
+        Write-Host "    Version : $(if ($current) { $current } else { 'Detected on system' })"
+        Write-Host "    Path    : $(if (Test-Path $INSTALL_DIR) { $INSTALL_DIR } else { 'C:\EmiratesIDCardToolkitService_64' })"
+        Write-Host ""
+        Write-Host "  Choose an action:" -ForegroundColor Yellow
+        Write-Host "    [1] Clean Reinstall (Remove current installation and install fresh)" -ForegroundColor White
+        Write-Host "    [2] Complete Uninstall (Permanently remove toolkit, services, and registry)" -ForegroundColor White
+        Write-Host "    [3] Exit without making any changes" -ForegroundColor White
+        Write-Host ""
+
+        $choice = if ($Action) {
+            switch -Regex ($Action) {
+                'reinstall|clean'  { '1' }
+                'uninstall|remove' { '2' }
+                default            { '3' }
+            }
+        } else {
+            Read-Host "  Select an option [1-3] (Default: 1)"
+        }
+
+        if (-not $choice) { $choice = "1" }
+
+        switch ($choice.Trim()) {
+            "2" {
+                Write-Host ""
+                Write-Step "Executing complete uninstallation..."
+                $ourSvcs = @(Get-TargetSvcs)
+                foreach ($s in $ourSvcs) {
+                    Write-Step "Stopping and removing service: $($s.Name)"
+                    Stop-Service -Name $s.Name -Force -EA SilentlyContinue
+                    & sc.exe delete "$($s.Name)" | Out-Null
+                }
+                Get-Process $SVC_EXE_NAME.Replace(".exe","") -EA SilentlyContinue |
+                    Where-Object { Is-OurPath $_.Path -or $_.Path -like "*EmiratesIDCardToolkitService*" } | Stop-Process -Force -EA SilentlyContinue
+                Start-Sleep -Seconds 2
+
+                $existing = Find-InstalledMsi
+                if ($existing) { Remove-OldInstall $existing.PSChildName; Start-Sleep -Seconds 2 }
+                Clear-MsiRegistration
+
+                if (Test-Path $INSTALL_DIR) {
+                    Write-Step "Removing $INSTALL_DIR"
+                    Remove-Item $INSTALL_DIR -Recurse -Force -EA SilentlyContinue
+                }
+                if (Test-Path "C:\EmiratesIDCardToolkitService_64") {
+                    Write-Step "Removing legacy folder C:\EmiratesIDCardToolkitService_64"
+                    Remove-Item "C:\EmiratesIDCardToolkitService_64" -Recurse -Force -EA SilentlyContinue
+                }
+                if (Test-Path $REG_PATH) {
+                    Remove-Item $REG_PATH -Recurse -Force -EA SilentlyContinue
+                }
+
+                Write-Host ""
+                Write-Host "  ================================================================" -ForegroundColor Cyan
+                Write-Host "  [OK] Complete uninstallation finished successfully." -ForegroundColor Green
+                Write-Host "  Developer : mujtaba989" -ForegroundColor Gray
+                Write-Host "  Purpose   : Tasheel & Typing Center Technical Maintenance" -ForegroundColor Gray
+                Write-Host "  ================================================================" -ForegroundColor Cyan
+                Write-Host ""
+                return
+            }
+            "3" {
+                Write-Host ""
+                Write-Ok "Setup aborted by user. No changes were made."
+                return
+            }
+            default {
+                Write-Ok "Proceeding with clean reinstall..."
+            }
+        }
+    }
+
+    # -------------------------------------------------------------------------
+    #  SCANNER HARDWARE SELECTION
+    # -------------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "  Select Biometric Hardware Configuration:" -ForegroundColor Yellow
+    Write-Host "    [1] AEGIS PRO4 / Capacitive Touch Terminals (Default - Disables Morpho override)" -ForegroundColor White
+    Write-Host "    [2] MorphoSmart MSO 1300 / 1350 Optical Readers" -ForegroundColor White
+    Write-Host "    [3] Auto-Detect / Both (Morpho prioritized if connected)" -ForegroundColor White
+    Write-Host ""
+
+    $scannerChoice = if ($ScannerMode) {
+        switch -Regex ($ScannerMode) {
+            'aegis'  { '1' }
+            'morpho' { '2' }
+            default  { '3' }
+        }
+    } else {
+        Read-Host "  Select preferred scanner [1-3] (Default: 1)"
+    }
+
+    if (-not $scannerChoice) { $scannerChoice = "1" }
+
+    $targetScanner = switch ($scannerChoice.Trim()) {
+        "2" { "Morpho" }
+        "3" { "Auto" }
+        default { "AEGIS" }
+    }
+    Write-Ok "Selected Biometric Profile: $targetScanner"
+    Write-Host ""
+
+    # -- STEP 1  Check for a newer release ------------------------------------
+    Write-Step "[1/9] Checking for latest release on GitHub..."
     $apiHdr  = @{ "User-Agent" = "EIDToolkit-Deployer/1.0"; "Accept" = "application/vnd.github+json" }
     $release = Invoke-RestMethod "https://api.github.com/repos/$GH_REPO/releases/latest" -Headers $apiHdr
     $latest  = $release.tag_name
-    $current = (Get-ItemProperty $REG_PATH -Name Version -EA SilentlyContinue).Version
 
     Write-Host "    Latest : $latest"
     Write-Host "    Current: $(if ($current) { $current } else { 'not installed' })"
 
-    if ($current -eq $latest -and (Test-AlreadyInstalled)) {
-        Write-Ok "Already on the latest version. Nothing to do."
-        return
-    }
-
     $asset = $release.assets | Where-Object { $_.name -eq $PKG_FILENAME } | Select-Object -First 1
     if (-not $asset) { Write-Fatal "Release $latest does not contain $PKG_FILENAME" }
 
-    # ── STEP 2  Resolve the package key ──────────────────────────────────────
+    # -- STEP 2  Resolve the package key --------------------------------------
+    Write-Step "[2/9] Resolving package decryption key..."
     if ($KeyFile) { $PackageKey = (Get-Content $KeyFile -Raw).Trim() }
     if (-not $PackageKey) {
         $ss = Read-Host "Enter package key" -AsSecureString
@@ -327,22 +434,22 @@ try {
         finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
     }
 
-    # ── STEP 3  Download ──────────────────────────────────────────────────────
+    # -- STEP 3  Download ------------------------------------------------------
     $_tmpDir = Join-Path $env:WINDIR ("Temp\EIDdeploy_" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory $_tmpDir -Force | Out-Null
 
     $pkgFile = Join-Path $_tmpDir $PKG_FILENAME
     $sizeMB  = [math]::Round($asset.size / 1MB, 1)
-    Write-Step "Downloading $PKG_FILENAME ($sizeMB MB)..."
+    Write-Step "[3/9] Downloading $PKG_FILENAME ($sizeMB MB)..."
 
     $dlHdr = @{}; foreach ($k in $apiHdr.Keys) { $dlHdr[$k] = $apiHdr[$k] }
     $dlHdr["Accept"] = "application/octet-stream"
     Download-File -Url $asset.url -Headers $dlHdr -Out $pkgFile
     Write-Ok "Download complete"
 
-    # ── STEP 4  Verify & decrypt ──────────────────────────────────────────────
+    # -- STEP 4  Verify & decrypt ----------------------------------------------
     # Package format: "EIDPK1" (6) | salt (16) | IV (16) | AES-256-CBC ciphertext | HMAC-SHA256 (32)
-    Write-Step "Verifying package integrity..."
+    Write-Step "[4/9] Verifying package integrity and decrypting..."
     $raw     = [IO.File]::ReadAllBytes($pkgFile)
     $magic   = [Text.Encoding]::ASCII.GetString($raw, 0, 6)
     if ($magic -ne "EIDPK1") { Write-Fatal "Unrecognised package format (bad header)." }
@@ -358,7 +465,7 @@ try {
     $computed = (New-Object Security.Cryptography.HMACSHA256 (,$macKey)).ComputeHash($raw, 0, $bodyEnd)
     $mismatch = 0
     for ($i = 0; $i -lt 32; $i++) { $mismatch = $mismatch -bor ($computed[$i] -bxor $raw[$bodyEnd + $i]) }
-    if ($mismatch -ne 0) { Write-Fatal "Package verification failed — wrong key or corrupted file." }
+    if ($mismatch -ne 0) { Write-Fatal "Package verification failed - wrong key or corrupted file." }
 
     $aes = [Security.Cryptography.Aes]::Create()
     $aes.KeySize = 256; $aes.Mode = "CBC"; $aes.Padding = "PKCS7"; $aes.Key = $encKey; $aes.IV = $iv
@@ -371,7 +478,8 @@ try {
     Expand-Archive -LiteralPath $zipFile -DestinationPath $extractTo -Force
     Write-Ok "Package verified and extracted"
 
-    # ── STEP 5  Remove existing installation ─────────────────────────────────
+    # -- STEP 5  Remove existing installation ---------------------------------
+    Write-Step "[5/9] Checking and cleaning previous installation..."
     $msiFile = Get-ChildItem $extractTo -Filter *.msi | Select-Object -First 1
     if (-not $msiFile) { Write-Fatal "No MSI found in package." }
     $msiHash = (Get-FileHash $msiFile.FullName -Algorithm SHA256).Hash
@@ -421,20 +529,20 @@ try {
             Remove-Item $INSTALL_DIR -Recurse -Force -EA SilentlyContinue
         }
     } else {
-        Write-Step "No previous installation found — fresh install"
+        Write-Step "No previous installation found - fresh install"
     }
 
-    # ── STEP 6  Install MSI ───────────────────────────────────────────────────
+    # -- STEP 6  Install MSI ---------------------------------------------------
+    Write-Step "[6/9] Installing official MSI package to $INSTALL_DIR..."
     $msiLog = "$env:WINDIR\Temp\EIDToolkit-msi.log"
-    Write-Step "Installing $($msiFile.Name) → $INSTALL_DIR"
     $args   = "/i `"$($msiFile.FullName)`" INSTALLDIR=`"$INSTALL_DIR\`" /qn /norestart /L*v `"$msiLog`""
     $result = Start-Process msiexec.exe -ArgumentList $args -Wait -PassThru
-    if ($result.ExitCode -notin 0, 3010, 1641) { Write-Fatal "MSI install failed (code $($result.ExitCode)) — see $msiLog" }
+    if ($result.ExitCode -notin 0, 3010, 1641) { Write-Fatal "MSI install failed (code $($result.ExitCode)) - see $msiLog" }
     Start-Sleep -Seconds 5
     if (-not (Test-Path (Join-Path $INSTALL_DIR $SVC_EXE_NAME))) {
-        Write-Fatal "MSI finished but $SVC_EXE_NAME was not found in $INSTALL_DIR — see $msiLog"
+        Write-Fatal "MSI finished but $SVC_EXE_NAME was not found in $INSTALL_DIR - see $msiLog"
     }
-    Write-Ok "MSI installed successfully"
+    Write-Ok "MSI package installed successfully"
 
     # Restore any protected service that the MSI may have removed
     foreach ($o in $others) {
@@ -446,7 +554,8 @@ try {
         }
     }
 
-    # ── STEP 7  Copy extra files from the package ─────────────────────────────
+    # -- STEP 7  Copy extra files from the package -----------------------------
+    Write-Step "[7/9] Deploying updated certificates and runtime libraries..."
     $pkgRoot = (Get-Item $extractTo).FullName.TrimEnd('\')
     $mapFile = Join-Path $pkgRoot "copy-map.txt"
     $copyMap = @()
@@ -456,7 +565,7 @@ try {
             $line = $line.Trim()
             if (-not $line -or $line.StartsWith("#")) { continue }
             $sep  = $line.IndexOf("=")
-            if ($sep -lt 1) { Write-Fatal "copy-map.txt: invalid line — '$line'" }
+            if ($sep -lt 1) { Write-Fatal "copy-map.txt: invalid line - '$line'" }
             $item = $line.Substring(0, $sep).Trim().Trim('"').Trim('\','/')
             $dest = [Environment]::ExpandEnvironmentVariables($line.Substring($sep + 1).Trim().Trim('"'))
             $src  = [IO.Path]::GetFullPath((Join-Path $pkgRoot $item))
@@ -476,7 +585,7 @@ try {
         Write-Host "    + $To" -ForegroundColor DarkGray
     }
 
-    # Files not in copy-map → install folder
+    # Files not in copy-map -> install folder
     foreach ($f in Get-ChildItem $pkgRoot -File -Recurse) {
         if ($f.FullName -eq $mapFile)                                   { continue }
         if ($f.DirectoryName -eq $pkgRoot -and $f.Extension -eq ".msi") { continue }
@@ -489,7 +598,7 @@ try {
         if (-not $mapped) { Copy-OneFile $f.FullName (Join-Path $INSTALL_DIR $f.FullName.Substring($pkgRoot.Length + 1)) }
     }
 
-    # Files in copy-map → their own destinations
+    # Files in copy-map -> their own destinations
     foreach ($m in $copyMap) {
         if (Test-Path $m.Src -PathType Container) {
             Get-ChildItem $m.Src -File -Recurse | ForEach-Object {
@@ -500,7 +609,51 @@ try {
         }
     }
 
-    # ── STEP 8  Register & start the service ──────────────────────────────────
+    # Pull latest official files from MOHRE live zip
+    try {
+        Write-Step "Fetching live updates from MOHRE official server..."
+        $mohreTmp = Join-Path $_tmpDir "mohre_live"
+        New-Item -ItemType Directory $mohreTmp -Force | Out-Null
+        $mohreZip = Join-Path $mohreTmp "EmiratesIDCardToolkitService_64.zip"
+
+        $mohreWc = New-Object System.Net.WebClient
+        $mohreWc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+        $mohreWc.DownloadFile($MOHRE_ZIP_URL, $mohreZip)
+
+        $mohreExtracted = Join-Path $mohreTmp "extracted"
+        Expand-Archive -LiteralPath $mohreZip -DestinationPath $mohreExtracted -Force
+
+        # Sync updated config files and signature provider
+        $liveFiles = Get-ChildItem $mohreExtracted -Recurse -File | Where-Object {
+            $_.Name -like "config_*" -or $_.Name -like "*.jar"
+        }
+
+        foreach ($lf in $liveFiles) {
+            $destFile = Join-Path $INSTALL_DIR $lf.Name
+            Copy-OneFile $lf.FullName $destFile
+        }
+        Write-Ok "Live MOHRE configuration and certificates synced ($($liveFiles.Count) files)"
+    } catch {
+        Write-Warn "Could not reach MOHRE live server - using bundled offline certificates: $($_.Exception.Message)"
+    }
+
+    # Apply selected Biometric Profile (Morpho vs AEGIS)
+    $sagemDll = Join-Path $INSTALL_DIR "SagemMSO1350.dll"
+    if ($targetScanner -eq "AEGIS") {
+        if (Test-Path $sagemDll) {
+            Rename-Item $sagemDll "SagemMSO1350.dll.disabled" -Force -EA SilentlyContinue
+            Write-Ok "Biometric Profile set to AEGIS: Morpho override disabled, direct binding active."
+        }
+    } elseif ($targetScanner -eq "Morpho" -or $targetScanner -eq "Auto") {
+        $disabledSagem = Join-Path $INSTALL_DIR "SagemMSO1350.dll.disabled"
+        if (Test-Path $disabledSagem) {
+            Rename-Item $disabledSagem "SagemMSO1350.dll" -Force -EA SilentlyContinue
+            Write-Ok "Biometric Profile set to $($targetScanner): Morpho optical reader enabled."
+        }
+    }
+
+    # -- STEP 8  Register & start the service ----------------------------------
+    Write-Step "[8/9] Configuring service recovery and security policies..."
     $ourSvc = Get-OurService
     if (-not $ourSvc) {
         Write-Step "Self-registering toolkit service..."
@@ -517,9 +670,11 @@ try {
     # Configure auto-recovery (restart service automatically on failure)
     & sc.exe failure "$($ourSvc.Name)" reset= 3600 actions= restart/10000/restart/30000/restart/60000 | Out-Null
 
-    # Ensure Windows Smart Card Service is set to Automatic and running
+    # Ensure Windows Smart Card Services are set to Automatic and running
     Set-Service SCardSvr -StartupType Automatic -EA SilentlyContinue
     Start-Service SCardSvr -EA SilentlyContinue
+    Set-Service ScDeviceEnum -StartupType Automatic -EA SilentlyContinue
+    Start-Service ScDeviceEnum -EA SilentlyContinue
 
     # Ensure Firewall allows EIDAToolkitService
     $exeFullPath = Join-Path $INSTALL_DIR $SVC_EXE_NAME
@@ -534,9 +689,20 @@ try {
         powercfg /setactive $planGuid 2>$null
     }
 
+    # Windows 10 Hardware Compatibility: Disable USB power-saving on AEGIS / Richmond & USB Hubs
+    $aegisNodes = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Enum\USB" -Recurse -EA SilentlyContinue |
+        Where-Object { $_.PSChildName -eq "Device Parameters" -and ($_.PSPath -like "*VID_3969*" -or $_.PSPath -like "*RootHub*" -or $_.PSPath -like "*GenericHub*") }
+
+    foreach ($node in $aegisNodes) {
+        Set-ItemProperty $node.PSPath -Name "EnhancedPowerManagementEnabled" -Value 0 -Type DWord -EA SilentlyContinue
+        Set-ItemProperty $node.PSPath -Name "AllowIdleIrpInD3" -Value 0 -Type DWord -EA SilentlyContinue
+        Set-ItemProperty $node.PSPath -Name "DeviceSelectiveSuspended" -Value 0 -Type DWord -EA SilentlyContinue
+        Set-ItemProperty $node.PSPath -Name "SelectiveSuspendEnabled" -Value 0 -Type DWord -EA SilentlyContinue
+    }
+
     $conflict = Get-Service ICAToolkit -EA SilentlyContinue
     if ($conflict -and $conflict.Status -eq "Running") {
-        Write-Warn "ICAToolkit service is also running — only one instance can be active at a time."
+        Write-Warn "ICAToolkit service is also running - only one instance can be active at a time."
     }
 
     try {
@@ -548,7 +714,8 @@ try {
         Write-Warn "Service installed but could not start: $($_.Exception.Message)"
     }
 
-    # ── STEP 9  Record version ────────────────────────────────────────────────
+    # -- STEP 9  Record version ------------------------------------------------
+    Write-Step "[9/9] Registering installation metadata..."
     New-Item $REG_PATH -Force | Out-Null
     Set-ItemProperty $REG_PATH -Name Version -Value $latest
     Set-ItemProperty $REG_PATH -Name MsiHash -Value $msiHash
@@ -556,12 +723,17 @@ try {
     Set-ItemProperty $REG_PATH -Name InstallDir -Value $INSTALL_DIR
 
     Write-Host ""
-    Write-Host "  ✔  EID Toolkit $latest deployed to $INSTALL_DIR" -ForegroundColor Green
+    Write-Host "  ================================================================" -ForegroundColor Cyan
+    Write-Host "  EID Toolkit $latest successfully deployed to $INSTALL_DIR" -ForegroundColor Green
+    Write-Host "  Biometric  : $targetScanner Profile Active" -ForegroundColor Green
+    Write-Host "  Developer  : mujtaba989" -ForegroundColor Gray
+    Write-Host "  Purpose    : Tasheel & Typing Center Technical Maintenance" -ForegroundColor Gray
+    Write-Host "  ================================================================" -ForegroundColor Cyan
     Write-Host ""
 }
 catch {
     Write-Host ""
-    Write-Host "  ✘  ERROR: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "  [X]  ERROR: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "     Log: $LOG_FILE" -ForegroundColor Red
     Write-Host ""
     $global:LASTEXITCODE = 1

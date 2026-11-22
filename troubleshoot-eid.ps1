@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Emirates ID Card Toolkit – Troubleshooter & WSS Stability Fixer
+    Emirates ID Card Toolkit - Troubleshooter & WSS Stability Fixer
 
 .DESCRIPTION
     Diagnoses and fixes the most common causes of:
@@ -10,11 +10,11 @@
     - Certificate / config errors
 
     Root causes addressed:
-    A) Expired VG signing certificate  → service crashes → WSS drops
-    B) No service auto-recovery        → one crash = permanent outage until reboot
-    C) USB selective suspend           → fingerprint device sleeps mid-session
-    D) Missing VC++ 2013 runtime       → DLL load failure
-    E) Firewall blocking local port    → browser can never connect
+    A) Expired VG signing certificate  -> service crashes -> WSS drops
+    B) No service auto-recovery        -> one crash = permanent outage until reboot
+    C) USB selective suspend           -> fingerprint device sleeps mid-session
+    D) Missing VC++ 2013 runtime       -> DLL load failure
+    E) Firewall blocking local port    -> browser can never connect
 
 .EXAMPLE
     irm https://raw.githubusercontent.com/mujtaba989/toolkit/main/troubleshoot-eid.ps1 | iex
@@ -26,9 +26,9 @@ param(
 $ErrorActionPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 function Title  { param($t) Write-Host "`n  [$t]" -ForegroundColor Yellow }
 function Ok     { param($m) Write-Host "    [PASS]  $m" -ForegroundColor Green }
 function Fail   { param($m) Write-Host "    [FAIL]  $m" -ForegroundColor Red }
@@ -39,9 +39,9 @@ function Fixed  { param($m) Write-Host "    [FIXED] $m" -ForegroundColor Magenta
 $issues = [System.Collections.Generic.List[string]]::new()
 $fixes  = [System.Collections.Generic.List[string]]::new()
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  LOCATE TOOLKIT SERVICE
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 $svc = Get-WmiObject Win32_Service -Filter "Name='ICAToolkitService'" -EA SilentlyContinue
 if (-not $svc) {
     $svc = Get-WmiObject Win32_Service -EA SilentlyContinue |
@@ -57,7 +57,7 @@ if ($svc) {
 }
 
 Write-Host ""
-Write-Host "  Emirates ID Toolkit – Troubleshooter & WSS Stability Fixer" -ForegroundColor Cyan
+Write-Host "  Emirates ID Toolkit - Troubleshooter & WSS Stability Fixer" -ForegroundColor Cyan
 Write-Host "  ==============================================================" -ForegroundColor Cyan
 Write-Host "  Target: https://eservices.mohre.gov.ae/tasheelweb/eidaservice.aspx" -ForegroundColor DarkGray
 Write-Host ""
@@ -66,7 +66,7 @@ Write-Host ""
 Title "1. SERVICE STATE"
 # ════════════════════════════════════════════════════════════════════════════
 if (-not $svc) {
-    Fail "Emirates ID Card Toolkit Service not found — run install-eid.ps1 first"
+    Fail "Emirates ID Card Toolkit Service not found - run install-eid.ps1 first"
     $issues.Add("Service not installed") | Out-Null
 } else {
     Info "Service   : $($svc.Name)  |  $($svc.DisplayName)"
@@ -74,14 +74,14 @@ if (-not $svc) {
     Info "StartType : $($svc.StartMode)   |   State: $($svc.State)"
 
     if ($svc.State -ne "Running") {
-        Fail "Service is $($svc.State) — WSS will drop immediately because nothing is listening"
+        Fail "Service is $($svc.State) - WSS will drop immediately because nothing is listening"
         $issues.Add("Service is $($svc.State)") | Out-Null
     } else {
         Ok "Service is Running"
     }
 
     if ($svc.StartMode -ne "Auto") {
-        Warn "StartType is '$($svc.StartMode)' — after a reboot it will NOT start automatically"
+        Warn "StartType is '$($svc.StartMode)' - after a reboot it will NOT start automatically"
         $issues.Add("StartType is not Automatic") | Out-Null
         if (-not $ReportOnly) {
             & sc.exe config "$svcName" start= auto | Out-Null
@@ -92,7 +92,7 @@ if (-not $svc) {
 }
 
 # ════════════════════════════════════════════════════════════════════════════
-Title "2. ROOT CAUSE — EXPIRED VG CERTIFICATE (causes WSS drops)"
+Title "2. ROOT CAUSE - EXPIRED VG CERTIFICATE (causes WSS drops)"
 # ════════════════════════════════════════════════════════════════════════════
 if ($svcDir) {
     $latestLog = Get-ChildItem $svcDir -Filter "*.log" -EA SilentlyContinue |
@@ -102,19 +102,19 @@ if ($svcDir) {
         $logText = Get-Content $latestLog.FullName -Raw -EA SilentlyContinue
         Info "Analysing: $($latestLog.Name)"
 
-        # Cert expired — the #1 WSS drop cause on this machine
+        # Cert expired - the #1 WSS drop cause on this machine
         if ($logText -match "certificate has expired") {
             Fail "EXPIRED VG CERTIFICATE detected"
-            Fail "Sequence: cert expired → toolkit won't init → service stops → browser WSS drops"
+            Fail "Sequence: cert expired -> toolkit won't init -> service stops -> browser WSS drops"
             Fail "This has been happening since: $(
                 (Get-ChildItem $svcDir -Filter '*.log' | Sort-Object Name |
                  Where-Object { (Get-Content $_.FullName -Raw) -match 'certificate has expired' } |
                  Select-Object -First 1).Name
             )"
-            $issues.Add("VG signing certificate expired — PRIMARY cause of WSS drops") | Out-Null
+            $issues.Add("VG signing certificate expired - PRIMARY cause of WSS drops") | Out-Null
             Info "Fix: re-run install-eid.ps1 to replace config_vg_prod with the fresh cert"
         } elseif ($logText -match "cert") {
-            Warn "Certificate warning in log — check manually"
+            Warn "Certificate warning in log - check manually"
         } else {
             Ok "No certificate errors in latest log"
         }
@@ -133,7 +133,7 @@ if ($svcDir) {
 
         # Agent fatal
         if ($logText -match "Agent initialisation failed") {
-            Fail "Agent init failed — service bound no port → browser WSS has nothing to connect to"
+            Fail "Agent init failed - service bound no port -> browser WSS has nothing to connect to"
             $issues.Add("Agent failed to bind WSS port") | Out-Null
         }
     }
@@ -154,7 +154,7 @@ $qf = & sc.exe qfailure "$svcName" 2>$null | Out-String
 if ($qf -match "RESTART -- Delay") {
     Ok "Service recovery is configured (auto-restart on failure)"
 } else {
-    Warn "No auto-recovery configured — a single crash leaves the port closed until someone manually restarts"
+    Warn "No auto-recovery configured - a single crash leaves the port closed until someone manually restarts"
     $issues.Add("No service auto-recovery") | Out-Null
     if (-not $ReportOnly -and $svcName) {
         # Reset count after 1 hour; restart after 10s, 30s, 60s
@@ -175,7 +175,7 @@ if ($existing) {
     Ok "Watchdog task '$taskName' already installed"
     Info "It runs every 2 minutes and restarts the service if the port goes silent"
 } else {
-    Warn "No watchdog task — if the service crashes silently, WSS stays down until manual fix"
+    Warn "No watchdog task - if the service crashes silently, WSS stays down until manual fix"
     $issues.Add("No watchdog scheduled task") | Out-Null
 
     if (-not $ReportOnly -and $svcName) {
@@ -190,7 +190,7 @@ if ($existing) {
         Info "Toolkit port detected: $portNum"
 
         $watchdogScript = @"
-# EIDToolkit Watchdog – auto-generated by troubleshoot-eid.ps1
+# EIDToolkit Watchdog - auto-generated by troubleshoot-eid.ps1
 `$svcName = '$svcName'
 `$port    = $portNum
 `$logFile = "`$env:WINDIR\Temp\EIDToolkit-watchdog.log"
@@ -217,7 +217,7 @@ if (-not `$portUp) {
     `$newState = (Get-Service `$svcName -EA SilentlyContinue).Status
     Write-Log "Service restarted. New state: `$newState"
 } else {
-    # Port is up — no action needed
+    # Port is up - no action needed
 }
 "@
         $wdPath = "$env:ProgramData\EIDToolkit\watchdog.ps1"
@@ -234,7 +234,7 @@ if (-not `$portUp) {
         Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
             -Settings $settings -Principal $principal -Force | Out-Null
 
-        Fixed "Watchdog task '$taskName' created — checks port $portNum every 2 minutes"
+        Fixed "Watchdog task '$taskName' created - checks port $portNum every 2 minutes"
         Fixed "Watchdog log: $env:WINDIR\Temp\EIDToolkit-watchdog.log"
         $fixes.Add("Created watchdog scheduled task (every 2 min, port $portNum)") | Out-Null
     }
@@ -284,7 +284,7 @@ if ($bioDev) {
         }
     }
 } else {
-    Warn "No biometric/fingerprint device detected — plug in the scanner and re-run"
+    Warn "No biometric/fingerprint device detected - plug in the scanner and re-run"
     $issues.Add("Fingerprint device not connected") | Out-Null
 }
 
@@ -323,9 +323,9 @@ foreach ($p in $toolkitPorts) {
 }
 
 if ($activePort) {
-    Ok "Toolkit WSS port $activePort is LISTENING — browser can connect"
+    Ok "Toolkit WSS port $activePort is LISTENING - browser can connect"
 } else {
-    Fail "No toolkit port is listening — WSS has nothing to connect to"
+    Fail "No toolkit port is listening - WSS has nothing to connect to"
     Fail "This confirms the service started but crashed before binding (cert / init failure)"
     $issues.Add("Toolkit port not listening") | Out-Null
 }
@@ -343,7 +343,7 @@ if ($fwRules) {
         else                       { Ok   "Firewall Allow: $($r.DisplayName) [$en]" }
     }
 } else {
-    Warn "No dedicated firewall rule — Windows Firewall may prompt to block the service"
+    Warn "No dedicated firewall rule - Windows Firewall may prompt to block the service"
     if (-not $ReportOnly -and $svcDir) {
         $exe = Join-Path $svcDir "EIDAToolkitService.exe"
         New-NetFirewallRule -DisplayName "EIDToolkit - Allow inbound" `
@@ -362,7 +362,7 @@ $vc = Get-ItemProperty "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVers
 if ($vc) {
     Ok "VC++ 2013 Redistributable: $($vc[0].DisplayName)"
 } else {
-    Fail "VC++ 2013 Redistributable missing — msvcp120.dll / msvcr120.dll will fail"
+    Fail "VC++ 2013 Redistributable missing - msvcp120.dll / msvcr120.dll will fail"
     $issues.Add("VC++ 2013 Redistributable missing") | Out-Null
     if (-not $ReportOnly) {
         $tmp = "$env:TEMP\vcredist_x86.exe"
@@ -372,7 +372,7 @@ if ($vc) {
             Fixed "VC++ 2013 Redistributable installed"
             $fixes.Add("Installed VC++ 2013 Redistributable") | Out-Null
         } catch {
-            Warn "Auto-install failed — download from: https://aka.ms/highdpimfc2013x86enu"
+            Warn "Auto-install failed - download from: https://aka.ms/highdpimfc2013x86enu"
         }
     }
 }
@@ -382,8 +382,8 @@ Title "10. BROWSER EXTENSION CHECK"
 # ════════════════════════════════════════════════════════════════════════════
 Info "The MOHRE page requires the 'Emirates ID Card Toolkit' browser extension"
 Info "Chrome : chrome://extensions   |   Edge: edge://extensions"
-Info "Look for: 'Emirates ID Card Toolkit' or 'ICA Toolkit' — must be ENABLED"
-Info "If missing: install from your IT admin or re-run the MOHRE page — it may prompt you"
+Info "Look for: 'Emirates ID Card Toolkit' or 'ICA Toolkit' - must be ENABLED"
+Info "If missing: install from your IT admin or re-run the MOHRE page - it may prompt you"
 
 $chromeExtDir = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Extensions"
 $edgeExtDir   = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Extensions"
@@ -403,7 +403,7 @@ if (-not $ReportOnly -and $svcName) {
         Start-Sleep -Seconds 6
         $newState = (Get-Service -Name $svcName -EA SilentlyContinue).Status
         if ($newState -eq "Running") { Fixed "Service is now Running" ; $fixes.Add("Restarted service") | Out-Null }
-        else                         { Fail  "Service still not running — expired cert must be fixed first (re-run install-eid.ps1)" }
+        else                         { Fail  "Service still not running - expired cert must be fixed first (re-run install-eid.ps1)" }
     }
 }
 
@@ -430,11 +430,11 @@ if ($issues.Count -eq 0) {
 if ($fixes.Count -gt 0) {
     Write-Host ""
     Write-Host "  Fixes applied ($($fixes.Count)):" -ForegroundColor Magenta
-    $fixes | ForEach-Object { Write-Host "    ✔ $_" -ForegroundColor Magenta }
+    $fixes | ForEach-Object { Write-Host "    [OK] $_" -ForegroundColor Magenta }
 }
 
 Write-Host ""
-Write-Host "  ── Action required ─────────────────────────────────────────────" -ForegroundColor DarkGray
+Write-Host "  -- Action required ---------------------------------------------" -ForegroundColor DarkGray
 Write-Host "  1. Re-run installer to fix expired cert (PRIMARY WSS drop cause):" -ForegroundColor White
 Write-Host "     irm https://raw.githubusercontent.com/mujtaba989/toolkit/main/install-eid.ps1 | iex" -ForegroundColor Green
 Write-Host ""
