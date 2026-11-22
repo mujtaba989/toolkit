@@ -766,14 +766,18 @@ if (-not `$portUp) {
 "@
         [IO.File]::WriteAllText($wdPath, $watchdogScript, [System.Text.Encoding]::ASCII)
 
-        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$wdPath`""
-        $trigStartup = New-ScheduledTaskTrigger -AtStartup
-        $trigRepeat  = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 2) -RepetitionDuration (New-TimeSpan -Days 3650)
-        $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew -StartWhenAvailable
-        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
-
-        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($trigStartup, $trigRepeat) -Settings $settings -Principal $principal -Force | Out-Null
-        Write-Ok "Daemon watchdog installed (monitors service & port 9004 every 2 minutes across Windows 10 & 11)"
+        # Use native schtasks.exe (100% universal across Windows 10 & 11 without CIM/PowerShell type-binding quirks)
+        $taskCmd = "powershell.exe -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"$wdPath\`""
+        $res = & schtasks.exe /create /tn "$taskName" /tr "$taskCmd" /sc minute /mo 2 /ru "SYSTEM" /rl HIGHEST /f 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Ok "Daemon watchdog installed (monitors service & port 9004 every 2 minutes across Windows 10 & 11)"
+        } else {
+            # Fallback to PowerShell ScheduledTask cmdlet
+            $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$wdPath`""
+            $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 2)
+            Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -User "SYSTEM" -Force | Out-Null
+            Write-Ok "Daemon watchdog registered via fallback"
+        }
     } catch {
         Write-Warn "Could not register watchdog task: $($_.Exception.Message)"
     }
