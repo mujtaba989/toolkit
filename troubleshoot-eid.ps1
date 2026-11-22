@@ -219,17 +219,25 @@ if (-not `$portUp) {
         New-Item -ItemType Directory "$env:ProgramData\EIDToolkit" -Force | Out-Null
         [IO.File]::WriteAllText($wdPath, $watchdogScript)
 
-        $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
-                       -Argument "-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$wdPath`""
-        $trigger = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes 2) -Once -At (Get-Date)
-        $settings= New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1) `
-                       -MultipleInstances IgnoreNew -StartWhenAvailable
-        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
-
-        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
-            -Settings $settings -Principal $principal -Force | Out-Null
-
-        Fixed "Watchdog task '$taskName' created - checks port $portNum every 2 minutes"
+        $taskCmd = "powershell.exe -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"$wdPath\`""
+        $res = & schtasks.exe /create /tn "$taskName" /tr "$taskCmd" /sc minute /mo 1 /ru "SYSTEM" /rl HIGHEST /f 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Fixed "Watchdog task '$taskName' created - checks port $portNum every 1 minute"
+        } else {
+            try {
+                $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
+                               -Argument "-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$wdPath`""
+                $trigger = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes 1) -Once -At (Get-Date)
+                $settings= New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1) `
+                               -MultipleInstances IgnoreNew -StartWhenAvailable
+                $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+                Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
+                    -Settings $settings -Principal $principal -Force | Out-Null
+                Fixed "Watchdog task '$taskName' created (PowerShell fallback)"
+            } catch {
+                Warn "Could not register watchdog task: $($_.Exception.Message)"
+            }
+        }
         Fixed "Watchdog log: $env:WINDIR\Temp\EIDToolkit-watchdog.log"
         $fixes.Add("Created watchdog scheduled task (every 2 min, port $portNum)") | Out-Null
     }
