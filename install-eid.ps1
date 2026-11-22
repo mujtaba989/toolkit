@@ -721,6 +721,62 @@ try {
 
     # Configure auto-recovery (restart service automatically on failure)
     & sc.exe failure "$($ourSvc.Name)" reset= 3600 actions= restart/10000/restart/30000/restart/60000 | Out-Null
+    & sc.exe failureflag "$($ourSvc.Name)" 1 | Out-Null
+
+    # Install persistent Watchdog task (daemon health monitor)
+    try {
+        $taskName = "EIDToolkit-Watchdog"
+        $wdPath = Join-Path $BACKUP_ROOT "watchdog.ps1"
+        New-Item -ItemType Directory $BACKUP_ROOT -Force | Out-Null
+
+        $watchdogScript = @"
+# EIDToolkit Watchdog - Persistent Health & Port Monitor
+`$svcName = '$($ourSvc.Name)'
+`$port = 9004
+`$logFile = "`$env:WINDIR\Temp\EIDToolkit-watchdog.log"
+
+function Write-Log(`$msg) {
+    "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  `$msg" | Out-File `$logFile -Append
+}
+
+`$svc = Get-Service -Name `$svcName -EA SilentlyContinue
+if (-not `$svc -or `$svc.Status -ne "Running") {
+    Write-Log "CRITICAL: Service `$svcName is stopped. Auto-restarting..."
+    Start-Service `$svcName -EA SilentlyContinue
+    Start-Sleep -Seconds 5
+}
+
+`$portUp = `$false
+try {
+    `$tcp = New-Object Net.Sockets.TcpClient
+    `$tcp.Connect("127.0.0.1", `$port)
+    `$portUp = `$tcp.Connected
+    `$tcp.Close()
+} catch { }
+
+if (-not `$portUp) {
+    Write-Log "WARNING: Port `$port not responding. Cycling `$svcName..."
+    Stop-Service `$svcName -Force -EA SilentlyContinue
+    Start-Sleep -Seconds 2
+    Start-Service `$svcName -EA SilentlyContinue
+    Start-Sleep -Seconds 5
+    `$newState = (Get-Service `$svcName -EA SilentlyContinue).Status
+    Write-Log "Cycle complete. New state: `$newState"
+}
+"@
+        [IO.File]::WriteAllText($wdPath, $watchdogScript, [System.Text.Encoding]::ASCII)
+
+        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$wdPath`""
+        $trigStartup = New-ScheduledTaskTrigger -AtStartup
+        $trigRepeat  = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 2) -RepetitionDuration (New-TimeSpan -Days 3650)
+        $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew -StartWhenAvailable
+        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($trigStartup, $trigRepeat) -Settings $settings -Principal $principal -Force | Out-Null
+        Write-Ok "Daemon watchdog installed (monitors service & port 9004 every 2 minutes across Windows 10 & 11)"
+    } catch {
+        Write-Warn "Could not register watchdog task: $($_.Exception.Message)"
+    }
 
     # Ensure Windows Smart Card Services are set to Automatic and running
     Set-Service SCardSvr -StartupType Automatic -EA SilentlyContinue
