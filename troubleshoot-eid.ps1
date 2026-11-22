@@ -258,32 +258,59 @@ if ($bioDev) {
         Info "Device: $($d.FriendlyName) [$($d.Status)]"
     }
 
-    if (-not $ReportOnly) {
-        # Disable selective suspend for USB root hubs and biometric devices
-        $usbHubs = Get-PnpDevice -Class USB -EA SilentlyContinue |
-                   Where-Object { $_.FriendlyName -like "*Root Hub*" -or $_.FriendlyName -like "*USB Hub*" }
-        $fixed = 0
-        foreach ($hub in $usbHubs) {
-            $devPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($hub.InstanceId)\Device Parameters"
-            if (Test-Path $devPath) {
-                Set-ItemProperty $devPath -Name "SelectiveSuspendEnabled" -Value 0 -Type DWord -EA SilentlyContinue
-                $fixed++
+    # Check USB Root Hubs and USB Hubs
+    $usbHubs = Get-PnpDevice -Class USB -EA SilentlyContinue |
+               Where-Object { $_.FriendlyName -like "*Root Hub*" -or $_.FriendlyName -like "*USB Hub*" }
+    $hubsToFix = @()
+    $totalHubs = 0
+    foreach ($hub in $usbHubs) {
+        $devPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($hub.InstanceId)\Device Parameters"
+        if (Test-Path $devPath) {
+            $totalHubs++
+            $val = (Get-ItemProperty $devPath -Name "SelectiveSuspendEnabled" -EA SilentlyContinue).SelectiveSuspendEnabled
+            if ($null -eq $val -or $val -ne 0) {
+                $hubsToFix += $devPath
             }
         }
-        if ($fixed -gt 0) {
+    }
+
+    if ($hubsToFix.Count -eq 0 -and $totalHubs -gt 0) {
+        Ok "USB selective suspend is disabled on all $totalHubs USB hub(s)"
+    } else {
+        if (-not $ReportOnly) {
+            $fixed = 0
+            foreach ($dp in $hubsToFix) {
+                Set-ItemProperty $dp -Name "SelectiveSuspendEnabled" -Value 0 -Type DWord -EA SilentlyContinue
+                $fixed++
+            }
             Fixed "Disabled USB selective suspend on $fixed hub(s)"
             $fixes.Add("Disabled USB selective suspend ($fixed hubs)") | Out-Null
+        } else {
+            Warn "USB selective suspend is enabled on $($hubsToFix.Count) hub(s)"
+            $issues.Add("USB selective suspend enabled on hubs") | Out-Null
         }
+    }
 
-        # Also set high-performance USB policy in power plan
-        $planGuid = (powercfg /getactivescheme) -replace '.*GUID:\s+(\S+).*','$1'
-        if ($planGuid) {
-            # USB selective suspend setting GUID
-            powercfg /setacvalueindex $planGuid 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>$null
-            powercfg /setdcvalueindex $planGuid 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>$null
-            powercfg /setactive $planGuid 2>$null
-            Fixed "USB selective suspend disabled in active power plan"
-            $fixes.Add("Disabled USB selective suspend in power plan") | Out-Null
+    # Check power plan USB selective suspend setting
+    $planGuid = (powercfg /getactivescheme) -replace '.*GUID:\s+(\S+).*','$1'
+    if ($planGuid) {
+        $pQuery = powercfg /query $planGuid 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 2>$null
+        $acDisabled = [bool]($pQuery | Select-String "Current AC Power Setting Index: 0x00000000")
+        $dcDisabled = [bool]($pQuery | Select-String "Current DC Power Setting Index: 0x00000000")
+
+        if ($acDisabled -and $dcDisabled) {
+            Ok "USB selective suspend is disabled in active power plan"
+        } else {
+            if (-not $ReportOnly) {
+                powercfg /setacvalueindex $planGuid 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>$null
+                powercfg /setdcvalueindex $planGuid 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>$null
+                powercfg /setactive $planGuid 2>$null
+                Fixed "USB selective suspend disabled in active power plan"
+                $fixes.Add("Disabled USB selective suspend in power plan") | Out-Null
+            } else {
+                Warn "USB selective suspend is enabled in active power plan"
+                $issues.Add("USB selective suspend enabled in power plan") | Out-Null
+            }
         }
     }
 } else {
