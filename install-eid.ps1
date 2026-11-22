@@ -689,9 +689,9 @@ try {
         powercfg /setactive $planGuid 2>$null
     }
 
-    # Windows 10 Hardware Compatibility: Disable USB power-saving on AEGIS / Richmond & USB Hubs
+    # Windows 10 Hardware Compatibility: Disable USB power-saving on AEGIS / Richmond / AGF200 & USB Hubs
     $aegisNodes = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Enum\USB" -Recurse -EA SilentlyContinue |
-        Where-Object { $_.PSChildName -eq "Device Parameters" -and ($_.PSPath -like "*VID_3969*" -or $_.PSPath -like "*RootHub*" -or $_.PSPath -like "*GenericHub*") }
+        Where-Object { $_.PSChildName -eq "Device Parameters" -and ($_.PSPath -like "*VID_3969*" -or $_.PSPath -like "*VID_2075*" -or $_.PSPath -like "*RootHub*" -or $_.PSPath -like "*GenericHub*") }
 
     foreach ($node in $aegisNodes) {
         Set-ItemProperty $node.PSPath -Name "EnhancedPowerManagementEnabled" -Value 0 -Type DWord -EA SilentlyContinue
@@ -699,6 +699,17 @@ try {
         Set-ItemProperty $node.PSPath -Name "DeviceSelectiveSuspended" -Value 0 -Type DWord -EA SilentlyContinue
         Set-ItemProperty $node.PSPath -Name "SelectiveSuspendEnabled" -Value 0 -Type DWord -EA SilentlyContinue
     }
+
+    # Ensure Windows Camera / UVC optical sensor access is allowed (required for AEGIS AGF200 on Windows 10)
+    $camPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam",
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam"
+    )
+    foreach ($cp in $camPaths) {
+        if (-not (Test-Path $cp)) { New-Item -Path $cp -Force -EA SilentlyContinue | Out-Null }
+        Set-ItemProperty $cp -Name "Value" -Value "Allow" -EA SilentlyContinue
+    }
+    Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy" -Name "LetAppsAccessCamera" -Value 1 -Type DWord -EA SilentlyContinue
 
     $conflict = Get-Service ICAToolkit -EA SilentlyContinue
     if ($conflict -and $conflict.Status -eq "Running") {
