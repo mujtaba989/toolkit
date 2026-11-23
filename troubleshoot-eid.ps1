@@ -341,6 +341,39 @@ if (-not $scSvc) {
     Ok "Smart Card service (SCardSvr) is Running"
 }
 
+# Check Emirates ID Card registration in Windows Calais
+$calaisReg = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Cryptography\Calais\SmartCards\Emirates ID Card (Idemia IAS-ECC Gen2)" -EA SilentlyContinue)
+if (-not $calaisReg -or -not $calaisReg.'80000001') {
+    Warn "Emirates ID Card ATR is not registered in Windows Calais - causes 'Unknown Smart Card' error"
+    $issues.Add("Emirates ID Card ATR not registered in Calais") | Out-Null
+    if (-not $ReportOnly) {
+        $cards = @(
+            @{ Name = "Emirates ID Card (Idemia IAS-ECC Gen2)"; ATR = [byte[]](0x3B, 0xB8, 0x97, 0x00, 0x81, 0x31, 0xFE, 0x45, 0xFF, 0xFF, 0x14, 0x82, 0x30, 0x50, 0x23, 0x00, 0xF1); Mask = [byte[]](0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF) },
+            @{ Name = "Emirates ID Card (Idemia Dual Interface)"; ATR = [byte[]](0x3B, 0x8F, 0x80, 0x01, 0x80, 0x4F, 0x0C, 0xA0, 0x00, 0x00, 0x03, 0x06, 0x03, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x68); Mask = [byte[]](0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF) },
+            @{ Name = "Emirates ID Card (Oberthur Cosmo 64 Gen1)"; ATR = [byte[]](0x3B, 0x7D, 0x94, 0x00, 0x00, 0x57, 0x44, 0x03, 0x02, 0x80); Mask = [byte[]](0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF) },
+            @{ Name = "Emirates ID Card (Safran IAS-ECC)"; ATR = [byte[]](0x3B, 0x9F, 0x96, 0x81, 0xB1, 0xFE, 0x45, 0x1F, 0x07, 0x00, 0x64, 0x05, 0x1E, 0xB2, 0x00, 0x14, 0x82, 0x30, 0x50, 0x23, 0xA2); Mask = [byte[]](0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF) },
+            @{ Name = "Emirates ID Card (New Dual Chip)"; ATR = [byte[]](0x3B, 0xF8, 0x18, 0x00, 0x00, 0x81, 0x31, 0xFE, 0x45, 0xFF, 0xFF, 0x14, 0x82, 0x30, 0x50, 0x23, 0x00, 0xB2); Mask = [byte[]](0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF) }
+        )
+        $roots = @("HKLM:\SOFTWARE\Microsoft\Cryptography\Calais\SmartCards", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Cryptography\Calais\SmartCards")
+        foreach ($rt in $roots) {
+            if (-not (Test-Path $rt)) { New-Item -Path $rt -Force -EA SilentlyContinue | Out-Null }
+            foreach ($card in $cards) {
+                $kp = Join-Path $rt $card.Name
+                if (-not (Test-Path $kp)) { New-Item -Path $kp -Force -EA SilentlyContinue | Out-Null }
+                Set-ItemProperty -Path $kp -Name "ATR" -Value $card.ATR -Type Binary -Force -EA SilentlyContinue
+                Set-ItemProperty -Path $kp -Name "ATRMask" -Value $card.Mask -Type Binary -Force -EA SilentlyContinue
+                Set-ItemProperty -Path $kp -Name "Crypto Provider" -Value "Microsoft Base Smart Card Crypto Provider" -Type String -Force -EA SilentlyContinue
+                Set-ItemProperty -Path $kp -Name "Smart Card Key Storage Provider" -Value "Microsoft Smart Card Key Storage Provider" -Type String -Force -EA SilentlyContinue
+                Set-ItemProperty -Path $kp -Name "80000001" -Value "%SystemRoot%\system32\msclmd.dll" -Type ExpandString -Force -EA SilentlyContinue
+            }
+        }
+        Fixed "Registered Emirates ID Smart Card ATRs with Class Minidriver in Windows Calais"
+        $fixes.Add("Registered Emirates ID Card in Calais") | Out-Null
+    }
+} else {
+    Ok "Emirates ID Smart Card definitions registered in Windows Calais"
+}
+
 # ----------------------------------------------------------------------------
 Title "7. TOOLKIT PORT (WSS endpoint)"
 # ----------------------------------------------------------------------------
@@ -413,21 +446,31 @@ Title "10. BIOMETRIC SENSOR PRIVACY (AEGIS / AGF200)"
 # On Windows 10/11, optical fingerprint sensors (e.g. AGF200) use the UVC/Camera subsystem.
 # If camera privacy is restricted, biometric capture fails with Error#50.
 $camVal = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam" -Name "Value" -EA SilentlyContinue).Value
+$camNonPkg = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam\NonPackaged" -Name "Value" -EA SilentlyContinue).Value
 $polVal = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy" -Name "LetAppsAccessCamera" -EA SilentlyContinue).LetAppsAccessCamera
 
-if ($camVal -eq "Deny" -or $polVal -eq 2) {
-    Warn "Camera access is restricted in Windows Privacy - optical biometric capture will fail (Error#50)"
+if ($camVal -eq "Deny" -or $camNonPkg -eq "Deny" -or $polVal -eq 2 -or -not $camNonPkg) {
+    Warn "Camera / optical sensor access is restricted in Windows Privacy - optical biometric capture will fail (Error#50)"
     $issues.Add("Camera privacy is blocking optical fingerprint sensor") | Out-Null
     if (-not $ReportOnly) {
         $camPaths = @(
             "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam",
-            "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam"
+            "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam\NonPackaged",
+            "Registry::HKEY_USERS\.DEFAULT\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam",
+            "Registry::HKEY_USERS\.DEFAULT\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam\NonPackaged",
+            "Registry::HKEY_USERS\S-1-5-18\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam",
+            "Registry::HKEY_USERS\S-1-5-18\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam\NonPackaged",
+            "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam",
+            "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam\NonPackaged"
         )
         foreach ($cp in $camPaths) {
             if (-not (Test-Path $cp)) { New-Item -Path $cp -Force -EA SilentlyContinue | Out-Null }
             Set-ItemProperty $cp -Name "Value" -Value "Allow" -EA SilentlyContinue
         }
-        Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy" -Name "LetAppsAccessCamera" -Value 1 -Type DWord -EA SilentlyContinue
+        $appPriv = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"
+        if (-not (Test-Path $appPriv)) { New-Item -Path $appPriv -Force -EA SilentlyContinue | Out-Null }
+        Set-ItemProperty $appPriv -Name "LetAppsAccessCamera" -Value 1 -Type DWord -EA SilentlyContinue
+        Set-ItemProperty $appPriv -Name "LetAppsAccessCamera_UserInControlOfTheseApps" -Value @() -Type MultiString -Force -EA SilentlyContinue
         Fixed "Allowed camera/optical sensor access in Windows privacy settings"
         $fixes.Add("Enabled camera/sensor privacy permissions") | Out-Null
     }
