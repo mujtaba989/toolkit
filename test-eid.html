@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Emirates ID & AEGIS PRO 4 - Hardware Diagnostic Suite</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --card-border: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #0284c7;
+      --accent-hover: #0369a1;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --code-bg: #0b1120;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 24px;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--card-border);
+      margin-bottom: 24px;
+    }
+    h1 {
+      font-size: 24px;
+      font-weight: 700;
+      color: #38bdf8;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+    .badge-success { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid #059669; }
+    .badge-danger { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #dc2626; }
+    .badge-warning { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid #d97706; }
+    .badge-info { background: rgba(2, 132, 199, 0.2); color: #38bdf8; border: 1px solid #0284c7; }
+
+    .status-ribbon {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .ribbon-item {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      padding: 14px 18px;
+      border-radius: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .ribbon-label {
+      font-size: 13px;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+    .ribbon-val {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+    }
+    .card-title {
+      font-size: 17px;
+      font-weight: 600;
+      color: #e2e8f0;
+      margin-bottom: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .btn-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    button {
+      background: var(--accent);
+      color: white;
+      border: none;
+      padding: 9px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    button:hover { background: var(--accent-hover); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.btn-success { background: #059669; }
+    button.btn-success:hover { background: #047857; }
+    button.btn-danger { background: #dc2626; }
+    button.btn-danger:hover { background: #b91c1c; }
+    button.btn-warning { background: #d97706; }
+    button.btn-warning:hover { background: #b45309; }
+    button.btn-outline {
+      background: transparent;
+      border: 1px solid var(--card-border);
+      color: var(--text);
+    }
+    button.btn-outline:hover {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: #64748b;
+    }
+
+    .info-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      margin-top: 8px;
+    }
+    .info-table td {
+      padding: 8px 10px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .info-table td:first-child {
+      color: var(--text-muted);
+      width: 35%;
+      font-weight: 500;
+    }
+    .info-table td:last-child {
+      color: #f1f5f9;
+      font-family: monospace;
+      word-break: break-all;
+    }
+
+    .fp-display-box {
+      background: var(--code-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 240px;
+      position: relative;
+    }
+    .fp-image {
+      max-width: 200px;
+      max-height: 260px;
+      border: 2px solid #38bdf8;
+      border-radius: 4px;
+      box-shadow: 0 0 15px rgba(56, 189, 248, 0.3);
+      display: none;
+    }
+    .fp-placeholder {
+      color: var(--text-muted);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    .console-box {
+      background: var(--code-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      font-family: Consolas, "SF Mono", Monaco, "Liberation Mono", monospace;
+      font-size: 12px;
+      padding: 14px;
+      height: 250px;
+      overflow-y: auto;
+      color: #cbd5e1;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .log-entry { margin-bottom: 4px; }
+    .log-time { color: #64748b; margin-right: 6px; }
+    .log-cyan { color: #38bdf8; }
+    .log-green { color: #34d399; }
+    .log-amber { color: #fbbf24; }
+    .log-red { color: #f87171; }
+
+    .help-note {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 10px;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>Emirates ID & AEGIS PRO 4 Diagnostic Suite</h1>
+        <p style="color: var(--text-muted); font-size: 13px; margin-top: 4px;">Hardware Verification Tool for Emirates ID Card Toolkit & AEGIS Biometric Terminals</p>
+      </div>
+      <div>
+        <span class="badge badge-info">v1.1.0</span>
+      </div>
+    </header>
+
+    <!-- Status Ribbon -->
+    <div class="status-ribbon">
+      <div class="ribbon-item">
+        <span class="ribbon-label">EIDA Toolkit (Port 9004)</span>
+        <div class="ribbon-val">
+          <span id="badge-ws" class="badge badge-warning">Connecting...</span>
+        </div>
+      </div>
+      <div class="ribbon-item">
+        <span class="ribbon-label">Hardware Bridge (Port 9005)</span>
+        <div class="ribbon-val">
+          <span id="badge-bridge" class="badge badge-warning">Checking...</span>
+        </div>
+      </div>
+      <div class="ribbon-item">
+        <span class="ribbon-label">Emirates ID Card Slot</span>
+        <div class="ribbon-val">
+          <span id="badge-card" class="badge badge-warning">Unknown</span>
+        </div>
+      </div>
+      <div class="ribbon-item">
+        <span class="ribbon-label">Biometric Optical LED</span>
+        <div class="ribbon-val">
+          <span id="badge-led" class="badge badge-warning">OFF</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Grid -->
+    <div class="grid">
+      <!-- Card Section -->
+      <div class="card">
+        <div class="card-title">
+          <span>Smart Card Reader & Emirates ID</span>
+          <span id="card-reader-count" class="badge badge-info">0 Readers</span>
+        </div>
+
+        <div class="btn-group">
+          <button id="btn-check-readers" onclick="checkSmartCardStatus()">
+            Check Readers & Card Status
+          </button>
+          <button id="btn-ws-connect-card" class="btn-outline" onclick="testWebSocketCardRead()">
+            Toolkit Service Test (Port 9004)
+          </button>
+        </div>
+
+        <table class="info-table">
+          <tr>
+            <td>Active Reader</td>
+            <td id="info-reader-name">None detected</td>
+          </tr>
+          <tr>
+            <td>Card Presence</td>
+            <td id="info-card-state">Not checked</td>
+          </tr>
+          <tr>
+            <td>Card ATR</td>
+            <td id="info-card-atr">None</td>
+          </tr>
+          <tr>
+            <td>Card Profile</td>
+            <td id="info-card-type">None</td>
+          </tr>
+          <tr>
+            <td>Toolkit Version</td>
+            <td id="info-toolkit-ver">Unknown</td>
+          </tr>
+        </table>
+
+        <div class="help-note">
+          Note: Insert your physical Emirates ID chip-first into the contact slot of the AEGIS terminal. When inserted, the ATR will show the genuine Idemia/Safran card signature.
+        </div>
+      </div>
+
+      <!-- Fingerprint & LED Section -->
+      <div class="card">
+        <div class="card-title">
+          <span>AEGIS Optical Fingerprint Scanner & LED</span>
+          <span id="scanner-sensor-badge" class="badge badge-info">AGF200 Camera</span>
+        </div>
+
+        <div class="btn-group">
+          <button id="btn-led-on" class="btn-success" onclick="controlLed('on')">
+            Turn Light ON
+          </button>
+          <button id="btn-led-off" class="btn-danger" onclick="controlLed('off')">
+            Turn Light OFF
+          </button>
+          <button id="btn-led-blink" class="btn-warning" onclick="controlLed('blink')">
+            Blink Light (3x)
+          </button>
+          <button id="btn-fp-capture" onclick="captureFingerprint()">
+            Capture Fingerprint Scan
+          </button>
+        </div>
+
+        <div class="fp-display-box">
+          <img id="fp-scan-img" class="fp-image" alt="Captured Fingerprint" />
+          <div id="fp-scan-placeholder" class="fp-placeholder">
+            Click <strong>Turn Light ON</strong> to illuminate the scanner glass, or click <strong>Capture Fingerprint Scan</strong> to acquire biometric scan.
+          </div>
+        </div>
+
+        <div class="help-note">
+          Direct hardware control communicates directly with <code>ID_FprCap.dll</code> and the internal ZhiAng optical camera sensor to turn on the green/blue light and stream biometric data.
+        </div>
+      </div>
+    </div>
+
+    <!-- Live Activity Log -->
+    <div class="card">
+      <div class="card-title">
+        <span>Live Diagnostic Activity Log</span>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn-outline" style="padding: 4px 10px; font-size: 11px;" onclick="copyLog()">Copy Log</button>
+          <button class="btn-outline" style="padding: 4px 10px; font-size: 11px;" onclick="clearLog()">Clear</button>
+        </div>
+      </div>
+      <div id="console-box" class="console-box"></div>
+    </div>
+  </div>
+
+  <script>
+    const BRIDGE_URL = "http://127.0.0.1:9005";
+    const WS_URLS = [
+      "wss://toolkitagent.mohre.gov.ae:9004",
+      "ws://127.0.0.1:9004"
+    ];
+    let ws = null;
+    let wsServiceContext = null;
+
+    function log(msg, color = "") {
+      const box = document.getElementById("console-box");
+      const time = new Date().toLocaleTimeString();
+      const div = document.createElement("div");
+      div.className = "log-entry";
+      div.innerHTML = `<span class="log-time">[${time}]</span> <span class="${color}">${escapeHtml(msg)}</span>`;
+      box.appendChild(div);
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement("div");
+      div.innerText = text;
+      return div.innerHTML;
+    }
+
+    function clearLog() {
+      document.getElementById("console-box").innerHTML = "";
+    }
+
+    function copyLog() {
+      const text = document.getElementById("console-box").innerText;
+      navigator.clipboard.writeText(text).then(() => alert("Log copied to clipboard!"));
+    }
+
+    // --- Direct Hardware Bridge Checks ---
+    async function checkBridgeStatus() {
+      try {
+        const res = await fetch(`${BRIDGE_URL}/api/card/status`, { mode: "cors", signal: AbortSignal.timeout(2000) });
+        if (res.ok) {
+          document.getElementById("badge-bridge").className = "badge badge-success";
+          document.getElementById("badge-bridge").innerText = "Online (9005)";
+          return true;
+        }
+      } catch (e) {
+        document.getElementById("badge-bridge").className = "badge badge-danger";
+        document.getElementById("badge-bridge").innerText = "Offline (9005)";
+      }
+      return false;
+    }
+
+    async function controlLed(action) {
+      log(`Calling Hardware Bridge: /api/led/${action}...`, "log-cyan");
+      try {
+        const res = await fetch(`${BRIDGE_URL}/api/led/${action}`, { mode: "cors" });
+        const data = await res.json();
+        log(`LED Response: ${JSON.stringify(data)}`, data.success ? "log-green" : "log-red");
+        
+        const badge = document.getElementById("badge-led");
+        if (action === "on") {
+          badge.className = "badge badge-success";
+          badge.innerText = "ON (Illuminated)";
+        } else if (action === "off") {
+          badge.className = "badge badge-warning";
+          badge.innerText = "OFF";
+        } else if (action === "blink") {
+          badge.className = "badge badge-info";
+          badge.innerText = "Blinked (3x)";
+          setTimeout(() => { badge.className = "badge badge-warning"; badge.innerText = "OFF"; }, 2000);
+        }
+      } catch (e) {
+        log(`Failed to communicate with bridge on port 9005: ${e.message}`, "log-red");
+        log(`Tip: Run 'test-bridge.ps1' or 'run-test-tool.bat' to enable direct LED control.`, "log-amber");
+      }
+    }
+
+    async function captureFingerprint() {
+      log("Initiating fingerprint capture on optical scanner...", "log-cyan");
+      const imgElem = document.getElementById("fp-scan-img");
+      const phElem = document.getElementById("fp-scan-placeholder");
+
+      phElem.innerText = "Illuminating sensor and capturing live frame... Place finger on glass!";
+      phElem.style.display = "block";
+      imgElem.style.display = "none";
+
+      try {
+        const res = await fetch(`${BRIDGE_URL}/api/fingerprint/capture`, { mode: "cors" });
+        const data = await res.json();
+        if (data.success && data.image) {
+          log(`Fingerprint capture SUCCESS! Resolution: ${data.width}x${data.height}`, "log-green");
+          imgElem.src = data.image;
+          imgElem.style.display = "block";
+          phElem.style.display = "none";
+        } else {
+          log(`Capture failed: ${data.message || JSON.stringify(data)}`, "log-red");
+          phElem.innerText = `Capture error: ${data.message || "Unknown error"}`;
+        }
+      } catch (e) {
+        log(`Failed to capture: ${e.message}`, "log-red");
+        phElem.innerText = "Hardware bridge offline. Please launch run-test-tool.bat.";
+      }
+    }
+
+    async function checkSmartCardStatus() {
+      log("Querying smartcard readers via PC/SC bridge...", "log-cyan");
+      try {
+        const res = await fetch(`${BRIDGE_URL}/api/card/status`, { mode: "cors" });
+        const data = await res.json();
+        if (data.success && data.readers) {
+          document.getElementById("card-reader-count").innerText = `${data.readers.length} Readers`;
+          const contactReader = data.readers.find(r => r.reader.toLowerCase().includes("contact")) || data.readers[0];
+          
+          if (contactReader) {
+            document.getElementById("info-reader-name").innerText = contactReader.reader;
+            document.getElementById("info-card-state").innerText = contactReader.status;
+            
+            const badgeCard = document.getElementById("badge-card");
+            if (contactReader.card_inserted) {
+              badgeCard.className = "badge badge-success";
+              badgeCard.innerText = "Card Inserted";
+              document.getElementById("info-card-atr").innerText = contactReader.atr;
+
+              if (contactReader.atr.includes("3B-B8-97-00-81-31-FE-45") || contactReader.atr.includes("3B-7D-96-00-00-80-31-80-65")) {
+                document.getElementById("info-card-type").innerText = "UAE Emirates ID (Safran / Idemia Gen 2)";
+              } else {
+                document.getElementById("info-card-type").innerText = "Smartcard Detected";
+              }
+              log(`Emirates ID card confirmed present! ATR: ${contactReader.atr}`, "log-green");
+            } else {
+              badgeCard.className = "badge badge-danger";
+              badgeCard.innerText = "No Card Inserted";
+              document.getElementById("info-card-atr").innerText = "None (Slot Empty)";
+              document.getElementById("info-card-type").innerText = "Please insert Emirates ID";
+              log("Smart card reader is online, but slot is currently empty. Insert card to test reading.", "log-amber");
+            }
+          }
+        }
+      } catch (e) {
+        log(`Bridge query failed: ${e.message}. Testing via WebSocket port 9004 instead...`, "log-amber");
+        testWebSocketCardRead();
+      }
+    }
+
+    // --- Official EIDA Toolkit WebSocket (Port 9004) ---
+    function initWebSocket() {
+      let currentUrlIdx = 0;
+
+      function tryConnect() {
+        if (currentUrlIdx >= WS_URLS.length) {
+          document.getElementById("badge-ws").className = "badge badge-danger";
+          document.getElementById("badge-ws").innerText = "Offline (9004)";
+          log("Could not establish WebSocket connection to Toolkit Service on port 9004.", "log-red");
+          return;
+        }
+
+        const url = WS_URLS[currentUrlIdx];
+        log(`Connecting to EIDA Toolkit Service at ${url}...`, "log-cyan");
+
+        try {
+          ws = new WebSocket(url, "eida-toolkit");
+          
+          ws.onopen = () => {
+            log(`Connected to EIDA Toolkit Service on port 9004!`, "log-green");
+            document.getElementById("badge-ws").className = "badge badge-success";
+            document.getElementById("badge-ws").innerText = "Online (9004)";
+            
+            // Handshake commands: Ping (cmd 0) and Init (cmd 1)
+            sendWsCmd({ cmd: 0 });
+            sendWsCmd({ cmd: 1 });
+          };
+
+          ws.onmessage = (event) => {
+            try {
+              const res = JSON.parse(event.data);
+              handleWsResponse(res);
+            } catch (e) {
+              log(`Raw WS frame: ${event.data}`, "log-cyan");
+            }
+          };
+
+          ws.onerror = (err) => {
+            log(`WebSocket error on ${url}`, "log-red");
+          };
+
+          ws.onclose = () => {
+            if (document.getElementById("badge-ws").className.includes("badge-success")) {
+              log("WebSocket connection closed.", "log-amber");
+              document.getElementById("badge-ws").className = "badge badge-warning";
+              document.getElementById("badge-ws").innerText = "Disconnected";
+            } else {
+              currentUrlIdx++;
+              setTimeout(tryConnect, 500);
+            }
+          };
+        } catch (e) {
+          currentUrlIdx++;
+          setTimeout(tryConnect, 500);
+        }
+      }
+
+      tryConnect();
+    }
+
+    function sendWsCmd(payload) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        log("WebSocket port 9004 is not open.", "log-red");
+        return;
+      }
+      if (wsServiceContext && !payload.service_context && payload.cmd !== 0 && payload.cmd !== 1) {
+        payload.service_context = wsServiceContext;
+      }
+      const json = JSON.stringify(payload);
+      log(`WS SEND: ${json}`, "log-cyan");
+      ws.send(json);
+    }
+
+    function handleWsResponse(res) {
+      log(`WS RECV: ${JSON.stringify(res)}`, res.status === "success" ? "log-green" : "log-amber");
+
+      if (res.service_context) {
+        wsServiceContext = res.service_context;
+        log(`EIDA Service Context established: ${wsServiceContext}`, "log-green");
+        // Automatically query readers and version
+        sendWsCmd({ cmd: 3, service_context: wsServiceContext });
+        sendWsCmd({ cmd: 38, service_context: wsServiceContext });
+      }
+
+      if (res.smartcard_readers) {
+        document.getElementById("card-reader-count").innerText = `${res.smartcard_readers.length} Readers`;
+        const contact = res.smartcard_readers.find(r => r.toLowerCase().includes("contact")) || res.smartcard_readers[0];
+        if (contact) {
+          document.getElementById("info-reader-name").innerText = contact;
+        }
+      }
+
+      if (res.device_id) {
+        document.getElementById("info-toolkit-ver").innerText = "v3.1.6 (Production Licensed)";
+      }
+
+      if (res.error_code === 245) {
+        // Smartcard removed
+        document.getElementById("badge-card").className = "badge badge-danger";
+        document.getElementById("badge-card").innerText = "Card Removed";
+        document.getElementById("info-card-state").innerText = "Smartcard slot is empty. Please insert Emirates ID.";
+      }
+    }
+
+    function testWebSocketCardRead() {
+      if (!wsServiceContext) {
+        sendWsCmd({ cmd: 1 });
+      } else {
+        const reader = document.getElementById("info-reader-name").innerText;
+        sendWsCmd({ cmd: 4, smartcard_reader: reader, service_context: wsServiceContext });
+      }
+    }
+
+    // Startup
+    window.addEventListener("DOMContentLoaded", async () => {
+      log("Initializing Diagnostic Suite...", "log-cyan");
+      await checkBridgeStatus();
+      initWebSocket();
+      checkSmartCardStatus();
+    });
+  </script>
+</body>
+</html>

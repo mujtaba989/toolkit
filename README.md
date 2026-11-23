@@ -93,6 +93,17 @@ Supports mixed and all-in-one hardware environments:
 
 ---
 
+## Hardware Diagnostic & Verification Suite
+
+To verify that your smart card reader and optical fingerprint scanner are operating properly before launching MOHRE:
+1. Double-click `run-test-tool.bat` in the repository folder.
+2. The interactive diagnostic dashboard opens in your browser at `http://127.0.0.1:9005/`:
+   * **Smart Card Test:** Shows detected contact & contactless readers, checks card insertion, and validates Emirates ID ATR.
+   * **Optical Scanner & LED Test:** Turn light ON, turn light OFF, blink light (3x), or capture a live biometric fingerprint scan rendered directly on screen.
+   * **Toolkit Service Test:** Verifies live WebSocket communication with `ICAToolkitService` on port 9004.
+
+---
+
 ## Log Paths
 
 * Service runtime logs: `C:\EmiratesIDCardToolkitService_64\EIDAToolkit_*.log`
