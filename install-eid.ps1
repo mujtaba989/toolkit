@@ -914,12 +914,12 @@ try {
         if ($targetScanner -eq "AEGIS") {
             if (Test-Path $sagemDll) {
                 Rename-Item $sagemDll "SagemMSO1350.dll.disabled" -Force -EA SilentlyContinue
-                Write-Ok "Biometric Profile in $td: AEGIS (Morpho override disabled, direct sensor active)"
+                Write-Ok "Biometric Profile in $($td): AEGIS (Morpho override disabled, direct sensor active)"
             }
         } elseif ($targetScanner -in "Morpho", "Auto") {
             if (Test-Path $disabledSagem) {
                 Rename-Item $disabledSagem "SagemMSO1350.dll" -Force -EA SilentlyContinue
-                Write-Ok "Biometric Profile in $td: $($targetScanner) (Morpho optical reader enabled)"
+                Write-Ok "Biometric Profile in $($td): $($targetScanner) (Morpho optical reader enabled)"
             }
         }
     }
