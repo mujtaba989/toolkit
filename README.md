@@ -1,6 +1,6 @@
-# Emirates ID Card Toolkit (MOHRE / Tasheel Deployer)
+# Emirates ID Card Toolkit (MOHRE / Tasheel Deployer) - Strictly 64-Bit (x64) Only
 
-Automated deployment and patch utility for the official Emirates ID Card Toolkit Service on Windows 10 and Windows 11 (x64/x86).
+Automated deployment and patch utility for the official Emirates ID Card Toolkit Service on 64-bit Windows 10 and Windows 11 (x64). Exclusively engineered for MorphoSmart MSO 1300 / 1350 series optical biometric scanners.
 
 Engineered specifically for UAE typing centers and Tasheel business centers to simplify workstation setup, restore broken smart card / biometric services, eliminate expired validation certificates, and ensure rock-solid stability for MOHRE portal transactions (`https://eservices.mohre.gov.ae/tasheelweb/eidaservice.aspx`).
 
@@ -8,28 +8,37 @@ Disclaimer: This tool is strictly developed for administrative convenience and t
 
 ---
 
+## Supported Workstation Architecture & Biometric Hardware
+
+* **Operating System Architecture:** **STRICTLY 64-bit (x64) Windows 10 / 11**. 32-bit (x86) systems are not supported.
+* **Biometric Hardware Engine:** **MorphoSmart MSO 1300 / 1350 Series Optical Scanners (Exclusive Production Engine)**.
+* **Morpho 64-Bit Driver Auto-Healing:** Bundled in the `x64/` package (`MorphoSmart USB 64 bits Driver.msi` + WHQL signed `usbbiodriver.inf`). The installer automatically checks if the Morpho driver is missing, corrupt, or out of sync, and performs a clean silent install and Driver Store registration.
+* **AEGIS PRO4 Status:** The AEGIS PRO4 capacitive terminal integration is currently **UNDER ACTIVE DEVELOPMENT** and disabled in this release. All setups automatically default to Morpho.
+
+---
+
 ## Step-by-Step Setup Guide
 
 ### Step 1: Hardware Pre-check
-1. Connect your smart card reader (AEGIS PRO4, Richmond Technologies, or Morpho combo) directly into a motherboard USB port (avoid unpowered USB hubs).
-2. Connect your biometric scanner (Morpho MSO 1300/1350, AEGIS capacitive sensor, SecuGen, etc.) to a direct USB port.
-3. Ensure the physical smart card contacts and fingerprint scanner surface are clean.
+1. Connect your smart card reader (Richmond Technologies, Identiv, or Morpho combo) directly into a motherboard USB port.
+2. Connect your MorphoSmart MSO 1300 / 1350 optical fingerprint reader to a direct USB port.
+3. Ensure the physical smart card contacts and fingerprint scanner prism glass are clean.
 
 ### Step 2: Run Deployment One-Liner
-1. Open PowerShell as Administrator on the target machine (Win + X -> Windows PowerShell / Terminal (Admin)).
+1. Open PowerShell as Administrator on the 64-bit workstation (Win + X -> Windows PowerShell / Terminal (Admin)).
 2. Paste and run the deployment script:
    ```powershell
    irm https://raw.githubusercontent.com/mujtaba989/toolkit/main/install-eid.ps1 | iex
    ```
 3. The automated deployment pipeline executes in clean phases:
-   * Step 1: Queries the latest verified release from GitHub.
+   * Step 1: Validates strictly 64-bit (x64) architecture and queries release from GitHub.
    * Step 2: Validates the security key and decrypts the service payload.
    * Step 3: Downloads the package with integrity verification.
    * Step 4: Verifies AES-256 and HMAC-SHA256 package authenticity.
    * Step 5: Cleans prior broken MSI/registry state without touching third-party services.
-   * Step 6: Verifies system runtime prerequisites (auto-installs Microsoft Visual C++ 2013 & 2015-2022 runtimes if missing) and installs the official core MSI service package.
-   * Step 7: Deploys updated runtime DLLs and automatically syncs live certificates and configs directly from MOHRE official server (`EmiratesIDCardToolkitService_64.zip`).
-   * Step 8: Configures service recovery, auto-starts `SCardSvr`, enables firewall access, and disables USB selective suspend.
+   * Step 6: Verifies system runtime prerequisites (VC++ 2013 & 2015-2022 runtimes), validates the 64-bit Morpho driver (auto-repairing from `x64/` if missing/corrupt), and installs the official core MSI service package.
+   * Step 7: Deploys updated runtime DLLs, enables `SagemMSO1350.dll`, and automatically syncs live certificates and configs directly from MOHRE official server (`EmiratesIDCardToolkitService_64.zip`).
+   * Step 8: Configures service recovery, auto-starts `SCardSvr`, enables firewall access, and disables USB selective suspend on Morpho devices and USB hubs.
    * Step 9: Records version registration and verifies port status.
 
 ### Step 3: Confirm Service Port
@@ -76,20 +85,20 @@ This scans 10 subsystem checks, starts any stopped background services, verifies
 
 ---
 
-## Hardware Compatibility (AEGIS PRO4, Morpho, Richmond)
+## Hardware Compatibility (Morpho Exclusive)
 
-Supports mixed and all-in-one hardware environments:
-* **Smart Cards (PC/SC Interface):** Powered by `PCSCLib.dll`. Detects card presence across AEGIS-P4-001, Richmond Contact/Contactless, and Morpho readers.
-* **Biometric Scanners:** Supports MorphoSmart MSO 1300/1350 via `SagemMSO1350.dll` as well as composite terminals (such as AEGIS PRO4) via the `Nexus.dll` integration layer.
+* **Biometric Scanners:** Exclusively supports **MorphoSmart MSO 1300 / 1350** optical readers via `SagemMSO1350.dll` and WHQL 64-bit `usbbiodriver.inf`.
+* **Smart Cards (PC/SC Interface):** Powered by `PCSCLib.dll`. Detects card presence across all standard contact and contactless CCID readers.
+* **AEGIS PRO4 Terminal:** Status: **UNDER ACTIVE DEVELOPMENT**. Not selectable in current release.
 
 ---
 
 ## System Requirements
 
-* **Operating System:** Windows 10 / Windows 11 (32-bit & 64-bit)
+* **Operating System:** Windows 10 / Windows 11 (**Strictly 64-bit / x64 Only**)
 * **Shell:** Windows PowerShell 5.1 or PowerShell Core 7.x (Run as Administrator)
 * **Port Requirements:** Local TCP 9004 / 9006
-* **Runtime Dependencies:** VC++ 2013 runtimes, SCard CCID drivers, Biometric USB/UART drivers
+* **Runtime Dependencies:** VC++ 2013 runtimes, SCard CCID drivers, MorphoSmart USB 64-bit Driver (bundled in `x64/`)
 
 ---
 

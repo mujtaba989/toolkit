@@ -1,12 +1,17 @@
 <#
 .SYNOPSIS
-    Emirates ID Card Toolkit - Silent Deployer & Self-Healing Installer
+    Emirates ID Card Toolkit - Silent Deployer & Self-Healing Installer (Strictly 64-Bit / x64 Only)
 
 .DESCRIPTION
     Pulls the latest toolkit release from GitHub, verifies the package
     integrity, and performs a clean install of the Emirates ID Card
-    Toolkit Service on Windows 10 / 11 with multi-tiered backup plans
-    for every single step to ensure guaranteed completion.
+    Toolkit Service on Windows 10 / 11 64-bit (x64) with multi-tiered
+    backup plans for every step to ensure guaranteed completion.
+
+    Biometric Engine: Exclusively configured for MorphoSmart MSO 1300 / 1350
+    series optical readers, including automated detection and clean installation
+    of the 64-bit Morpho driver package.
+    Note: AEGIS PRO4 profile is currently under active development and disabled.
 
 .PARAMETER PackageKey
     Decryption key for the release package. If omitted the script uses
@@ -16,13 +21,14 @@
     Path to a text file containing the decryption key.
 
 .PARAMETER ScannerMode
-    Biometric scanner profile: "AEGIS", "Morpho", or "Auto".
+    Biometric scanner profile: "Morpho" (Default / Production Active).
+    Note: AEGIS profile is under development and disabled.
 
 .PARAMETER Action
     Installation action: "Install", "Reinstall", or "Uninstall".
 
 .EXAMPLE
-    # One-liner (run as Administrator):
+    # One-liner (run as Administrator on 64-bit Windows):
     irm https://raw.githubusercontent.com/mujtaba989/toolkit/main/install-eid.ps1 | iex
 
 .NOTES
@@ -32,7 +38,7 @@
 param(
     [string] $PackageKey  = "Abc@1234",
     [string] $KeyFile,
-    [string] $ScannerMode,
+    [string] $ScannerMode = "Morpho",
     [string] $Action
 )
 
@@ -427,13 +433,134 @@ function Ensure-Dependencies([string]$TempDir) {
     }
 }
 
+# Ensure MorphoSmart 64-bit USB Driver is installed, registered, and healthy
+function Ensure-MorphoDriver([string]$TempDir) {
+    Write-Step "Checking MorphoSmart USB 64-bit Driver status..."
+
+    # Check 1: Uninstall registry key
+    $morphoReg = Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -EA SilentlyContinue |
+        Where-Object { $_.DisplayName -like "*MorphoSmart USB 64 bits Driver*" -or $_.PSChildName -eq "{C2CCA71A-E107-46BA-8365-26E6192EBC34}" }
+
+    # Check 2: PnP driver store registration
+    $pnpOut = & pnputil.exe /enum-drivers 2>$null | Out-String
+    $pnpInstalled = ($pnpOut -match "usbbiodriver\.inf" -or $pnpOut -match "MORPHO")
+
+    # Check 3: Connected Morpho hardware error / yellow bang check
+    $morphoDevices = Get-PnpDevice -EA SilentlyContinue | Where-Object {
+        $_.InstanceId -match "VID_079B" -or $_.InstanceId -match "VID_225D" -or $_.FriendlyName -like "*Morpho*"
+    }
+    $hardwareError = $false
+    foreach ($dev in $morphoDevices) {
+        if ($dev.Status -ne "OK" -or $dev.Problem -ne 0) {
+            $hardwareError = $true
+            Write-Warn "Connected Morpho hardware has error status ($($dev.FriendlyName) - Problem $($dev.Problem))"
+        }
+    }
+
+    $isCorrupt = $false
+    if ($morphoReg -and (-not $pnpInstalled -or $hardwareError)) {
+        $isCorrupt = $true
+        Write-Warn "Detected corrupt or incomplete MorphoSmart driver installation. Initiating clean repair..."
+    }
+
+    if ($morphoReg -and $pnpInstalled -and -not $hardwareError) {
+        Write-Ok "MorphoSmart USB 64-bit driver is verified healthy ($($morphoReg.DisplayVersion))"
+        return
+    }
+
+    # Locate driver source folder (x64)
+    $x64Dir = $null
+    $candidates = @(
+        (Join-Path $PSScriptRoot "x64"),
+        "E:\Github\toolkit\x64",
+        (Join-Path $BACKUP_ROOT "x64"),
+        (Join-Path $TempDir "x64")
+    )
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path (Join-Path $c "MorphoSmart USB 64 bits Driver.msi"))) {
+            $x64Dir = $c
+            break
+        }
+    }
+
+    # If running remotely via irm | iex, download driver package files to temp
+    if (-not $x64Dir) {
+        Write-Step "Downloading MorphoSmart 64-bit driver package from GitHub repository..."
+        $x64Dir = Join-Path $TempDir "x64"
+        New-Item -ItemType Directory $x64Dir -Force -EA SilentlyContinue | Out-Null
+
+        $filesToFetch = @(
+            "MorphoSmart USB 64 bits Driver.msi",
+            "Data1.cab",
+            "usbbiodriver.inf",
+            "usbbiodriver.cat",
+            "usbbiodriver_x64.sys",
+            "msocoinstaller_x64.dll",
+            "serv_spusb.exe"
+        )
+        $baseUrl = "https://raw.githubusercontent.com/$GH_REPO/main/x64"
+        foreach ($fn in $filesToFetch) {
+            $dest = Join-Path $x64Dir $fn
+            $url  = "$baseUrl/$([Uri]::EscapeDataString($fn))"
+            Download-FileWithFallback -Urls @($url) -OutFile $dest | Out-Null
+        }
+    }
+
+    $msiFile = Join-Path $x64Dir "MorphoSmart USB 64 bits Driver.msi"
+    $infFile = Join-Path $x64Dir "usbbiodriver.inf"
+
+    if (-not (Test-Path $msiFile)) {
+        Write-Warn "Morpho driver installer not found at $msiFile - proceeding with setup"
+        return
+    }
+
+    # Clean uninstall if corrupt
+    if ($isCorrupt -and $morphoReg) {
+        Write-Step "Removing corrupt MorphoSmart driver registration..."
+        Start-Process msiexec.exe -ArgumentList "/x `"{C2CCA71A-E107-46BA-8365-26E6192EBC34}`" /qn /norestart" -Wait -WindowStyle Hidden -EA SilentlyContinue
+        Start-Sleep -Seconds 2
+    }
+
+    Write-Step "Installing MorphoSmart USB 64-bit Driver..."
+    $proc = Start-Process msiexec.exe -ArgumentList "/i `"$msiFile`" /qn /norestart" -Wait -PassThru -EA SilentlyContinue
+    if ($proc.ExitCode -in 0, 3010) {
+        Write-Ok "MorphoSmart USB 64-bit Driver installed successfully"
+    } else {
+        Write-Warn "MSI exited with code $($proc.ExitCode). Applying PnP driver store installation..."
+    }
+
+    if (Test-Path $infFile) {
+        Write-Step "Registering usbbiodriver.inf in Windows Driver Store..."
+        $pnpRes = & pnputil.exe /add-driver $infFile /install 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0 -or $pnpRes -match "successfully") {
+            Write-Ok "Registered Morpho driver package in Windows Driver Store"
+        }
+    }
+}
+
 # -----------------------------------------------------------------------------
 #  MAIN INSTALLATION FLOW
 # -----------------------------------------------------------------------------
 try {
+    # -------------------------------------------------------------------------
+    #  ARCHITECTURE CHECK: STRICTLY 64-BIT (x64) ONLY
+    # -------------------------------------------------------------------------
+    if (-not [Environment]::Is64BitOperatingSystem -or $env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
+        Write-Host ""
+        Write-Host "  ================================================================" -ForegroundColor Red
+        Write-Host "  [FAIL] INCOMPATIBLE ARCHITECTURE: 32-BIT (x86) DETECTED" -ForegroundColor Red
+        Write-Host "  This installer is strictly designed for 64-bit (x64) Windows computers." -ForegroundColor Yellow
+        Write-Host "  32-bit (x86) Windows systems are NOT supported." -ForegroundColor Yellow
+        Write-Host "  ================================================================" -ForegroundColor Red
+        Write-Host ""
+        throw "Unsupported architecture. This toolkit deployer requires 64-bit (x64) Windows."
+    }
+
     Write-Host ""
-    Write-Host "  Emirates ID Card Toolkit - Deployer" -ForegroundColor Yellow
-    Write-Host "  =====================================" -ForegroundColor Yellow
+    Write-Host "  ================================================================" -ForegroundColor Cyan
+    Write-Host "  Emirates ID Card Toolkit - Deployer (Strictly 64-Bit / x64 Only)" -ForegroundColor Yellow
+    Write-Host "  Biometric Engine: MorphoSmart MSO Series (Morpho Exclusive)" -ForegroundColor Yellow
+    Write-Host "  ================================================================" -ForegroundColor Cyan
     Write-Host ""
 
     # -------------------------------------------------------------------------
@@ -519,33 +646,32 @@ try {
     }
 
     # -------------------------------------------------------------------------
-    #  SCANNER HARDWARE SELECTION
+    #  SCANNER HARDWARE SELECTION (MORPHO EXCLUSIVE)
     # -------------------------------------------------------------------------
     Write-Host ""
-    Write-Host "  Select Biometric Hardware Configuration:" -ForegroundColor Yellow
-    Write-Host "    [1] AEGIS PRO4 / Capacitive Touch Terminals (Default - Disables Morpho override)" -ForegroundColor White
-    Write-Host "    [2] MorphoSmart MSO 1300 / 1350 Optical Readers" -ForegroundColor White
-    Write-Host "    [3] Auto-Detect / Both (Morpho prioritized if connected)" -ForegroundColor White
+    Write-Host "  Biometric Hardware Profile:" -ForegroundColor Yellow
+    Write-Host "    [1] MorphoSmart MSO 1300 / 1350 Optical Readers (Production Active - Default)" -ForegroundColor Green
+    Write-Host "    [2] AEGIS PRO4 / Capacitive Touch [UNDER DEVELOPMENT - NOT AVAILABLE]" -ForegroundColor DarkGray
     Write-Host ""
 
     $scannerChoice = if ($ScannerMode) {
         switch -Regex ($ScannerMode) {
-            'aegis'  { '1' }
-            'morpho' { '2' }
-            default  { '3' }
+            'aegis'  { '2' }
+            default  { '1' }
         }
     } else {
-        Read-Host "  Select preferred scanner [1-3] (Default: 1)"
+        Read-Host "  Select preferred scanner [1-2] (Default: 1 - Morpho)"
     }
 
     if (-not $scannerChoice) { $scannerChoice = "1" }
 
-    $targetScanner = switch ($scannerChoice.Trim()) {
-        "2" { "Morpho" }
-        "3" { "Auto" }
-        default { "AEGIS" }
+    if ($scannerChoice.Trim() -eq "2" -or ($ScannerMode -and $ScannerMode -match "aegis")) {
+        Write-Warn "AEGIS PRO4 profile is currently UNDER DEVELOPMENT and unavailable in this release."
+        Write-Ok "Automatically defaulting to MorphoSmart MSO Production Profile."
     }
-    Write-Ok "Selected Biometric Profile: $targetScanner"
+
+    $targetScanner = "Morpho"
+    Write-Ok "Selected Biometric Profile: MorphoSmart MSO (Active Production Profile)"
     Write-Host ""
 
     # -- STEP 1  Resolve release metadata -------------------------------------
@@ -732,6 +858,7 @@ try {
 
     # -- STEP 6  Install MSI with Multi-Tiered Backup Plans --------------------
     Ensure-Dependencies -TempDir $_tmpDir
+    Ensure-MorphoDriver -TempDir $_tmpDir
     Write-Step "[6/9] Installing core package to $INSTALL_DIR..."
     New-Item -ItemType Directory $INSTALL_DIR -Force -EA SilentlyContinue | Out-Null
 
@@ -904,23 +1031,18 @@ try {
         Write-Warn "MOHRE live sync skipped: $($_.Exception.Message) - bundled certificates active."
     }
 
-    # Apply selected Biometric Profile (AEGIS vs Morpho)
+    # Apply Biometric Profile: Strictly MorphoSmart MSO Series (Morpho Exclusive)
     $targetDirs = @($INSTALL_DIR, "C:\EmiratesIDCardToolkitService_64") | Select-Object -Unique
     foreach ($td in $targetDirs) {
         if (-not (Test-Path $td)) { continue }
         $sagemDll = Join-Path $td "SagemMSO1350.dll"
         $disabledSagem = Join-Path $td "SagemMSO1350.dll.disabled"
 
-        if ($targetScanner -eq "AEGIS") {
-            if (Test-Path $sagemDll) {
-                Rename-Item $sagemDll "SagemMSO1350.dll.disabled" -Force -EA SilentlyContinue
-                Write-Ok "Biometric Profile in $($td): AEGIS (Morpho override disabled, direct sensor active)"
-            }
-        } elseif ($targetScanner -in "Morpho", "Auto") {
-            if (Test-Path $disabledSagem) {
-                Rename-Item $disabledSagem "SagemMSO1350.dll" -Force -EA SilentlyContinue
-                Write-Ok "Biometric Profile in $($td): $($targetScanner) (Morpho optical reader enabled)"
-            }
+        if (Test-Path $disabledSagem) {
+            Rename-Item $disabledSagem "SagemMSO1350.dll" -Force -EA SilentlyContinue
+        }
+        if (Test-Path $sagemDll) {
+            Write-Ok "Biometric Profile in $($td): MorphoSmart MSO optical reader enabled (SagemMSO1350.dll active)"
         }
     }
 
@@ -1060,12 +1182,12 @@ if (-not `$portUp) {
         }
     } catch { }
 
-    # Windows 10 Hardware Compatibility: Disable USB power-saving on AEGIS / Richmond / AGF200 & USB Hubs
+    # Windows 10/11 Hardware Compatibility: Disable USB power-saving on Morpho / Sagem / USB Hubs
     try {
-        $aegisNodes = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Enum\USB" -Recurse -EA SilentlyContinue |
-            Where-Object { $_.PSChildName -eq "Device Parameters" -and ($_.PSPath -like "*VID_3969*" -or $_.PSPath -like "*VID_2075*" -or $_.PSPath -like "*RootHub*" -or $_.PSPath -like "*GenericHub*") }
+        $morphoNodes = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Enum\USB" -Recurse -EA SilentlyContinue |
+            Where-Object { $_.PSChildName -eq "Device Parameters" -and ($_.PSPath -like "*VID_079B*" -or $_.PSPath -like "*VID_225D*" -or $_.PSPath -like "*VID_3969*" -or $_.PSPath -like "*VID_2075*" -or $_.PSPath -like "*RootHub*" -or $_.PSPath -like "*GenericHub*") }
 
-        foreach ($node in $aegisNodes) {
+        foreach ($node in $morphoNodes) {
             Set-ItemProperty $node.PSPath -Name "EnhancedPowerManagementEnabled" -Value 0 -Type DWord -EA SilentlyContinue
             Set-ItemProperty $node.PSPath -Name "AllowIdleIrpInD3" -Value 0 -Type DWord -EA SilentlyContinue
             Set-ItemProperty $node.PSPath -Name "DeviceSelectiveSuspended" -Value 0 -Type DWord -EA SilentlyContinue

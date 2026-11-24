@@ -56,10 +56,17 @@ if ($svc) {
     $svcName = $svc.Name
 }
 
+if (-not [Environment]::Is64BitOperatingSystem -or $env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
+    Write-Host "`n  [FAIL] INCOMPATIBLE ARCHITECTURE: Strictly 64-bit (x64) Windows Only." -ForegroundColor Red
+    throw "Unsupported architecture."
+}
+
 Write-Host ""
 Write-Host "  Emirates ID Toolkit - Troubleshooter & WSS Stability Fixer" -ForegroundColor Cyan
 Write-Host "  ==============================================================" -ForegroundColor Cyan
-Write-Host "  Target: https://eservices.mohre.gov.ae/tasheelweb/eidaservice.aspx" -ForegroundColor DarkGray
+Write-Host "  Target Platform : Strictly 64-bit (x64) Windows Only" -ForegroundColor DarkGray
+Write-Host "  Biometric Engine: MorphoSmart MSO Optical Series (Morpho Exclusive)" -ForegroundColor DarkGray
+Write-Host "  Target Portal   : https://eservices.mohre.gov.ae/tasheelweb/eidaservice.aspx" -ForegroundColor DarkGray
 Write-Host ""
 
 # ----------------------------------------------------------------------------
@@ -316,6 +323,60 @@ if ($bioDev) {
 } else {
     Warn "No biometric/fingerprint device detected - plug in the scanner and re-run"
     $issues.Add("Fingerprint device not connected") | Out-Null
+}
+
+# ----------------------------------------------------------------------------
+Title "5B. MORPHOSMART USB 64-BIT DRIVER & BIOMETRIC PLUGIN"
+# ----------------------------------------------------------------------------
+$morphoReg = Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -EA SilentlyContinue |
+    Where-Object { $_.DisplayName -like "*MorphoSmart USB 64 bits Driver*" -or $_.PSChildName -eq "{C2CCA71A-E107-46BA-8365-26E6192EBC34}" }
+$pnpOut = & pnputil.exe /enum-drivers 2>$null | Out-String
+$pnpInstalled = ($pnpOut -match "usbbiodriver\.inf" -or $pnpOut -match "MORPHO")
+
+if ($morphoReg -and $pnpInstalled) {
+    Ok "MorphoSmart USB 64-bit driver is verified healthy ($($morphoReg.DisplayVersion))"
+} elseif ($morphoReg -or $pnpInstalled) {
+    Warn "MorphoSmart driver registration is incomplete or driver store is out of sync"
+    $issues.Add("MorphoSmart driver incomplete") | Out-Null
+    if (-not $ReportOnly) {
+        $x64Dir = "E:\Github\toolkit\x64"
+        if (Test-Path (Join-Path $x64Dir "usbbiodriver.inf")) {
+            & pnputil.exe /add-driver (Join-Path $x64Dir "usbbiodriver.inf") /install | Out-Null
+            Fixed "Re-registered usbbiodriver.inf in Windows Driver Store"
+            $fixes.Add("Re-registered Morpho driver") | Out-Null
+        }
+    }
+} else {
+    Warn "MorphoSmart USB 64-bit driver is not installed"
+    $issues.Add("MorphoSmart USB 64-bit driver missing") | Out-Null
+    if (-not $ReportOnly) {
+        $x64Dir = "E:\Github\toolkit\x64"
+        $msi = Join-Path $x64Dir "MorphoSmart USB 64 bits Driver.msi"
+        if (Test-Path $msi) {
+            Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart" -Wait -WindowStyle Hidden -EA SilentlyContinue
+            & pnputil.exe /add-driver (Join-Path $x64Dir "usbbiodriver.inf") /install | Out-Null
+            Fixed "Installed MorphoSmart USB 64-bit Driver from local package"
+            $fixes.Add("Installed MorphoSmart USB 64-bit Driver") | Out-Null
+        }
+    }
+}
+
+# Verify SagemMSO1350.dll is active
+$targetDirs = @($svcDir, "C:\EmiratesIDCardToolkitService_64") | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+foreach ($td in $targetDirs) {
+    $disabledSagem = Join-Path $td "SagemMSO1350.dll.disabled"
+    $activeSagem = Join-Path $td "SagemMSO1350.dll"
+    if (Test-Path $disabledSagem) {
+        Warn "Morpho plugin is disabled in $td (SagemMSO1350.dll.disabled)"
+        $issues.Add("SagemMSO1350.dll is disabled") | Out-Null
+        if (-not $ReportOnly) {
+            Rename-Item $disabledSagem "SagemMSO1350.dll" -Force -EA SilentlyContinue
+            Fixed "Restored SagemMSO1350.dll for MorphoSmart optical reader"
+            $fixes.Add("Restored SagemMSO1350.dll") | Out-Null
+        }
+    } elseif (Test-Path $activeSagem) {
+        Ok "Morpho optical biometric plugin is active in $td (SagemMSO1350.dll)"
+    }
 }
 
 # ----------------------------------------------------------------------------
