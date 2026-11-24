@@ -342,7 +342,7 @@ function Clear-MsiRegistration {
 
 # Remove any previous daemon / watchdog scheduled tasks and script files safely
 function Remove-PreviousWatchdogs {
-    $watchdogTasks = @("EIDToolkit-Watchdog", "EID_MOHRE-Watchdog", "ToolkitWatchdog")
+    $watchdogTasks = @("EIDToolkit-Watchdog", "EID_MOHRE-Watchdog", "ToolkitWatchdog", "EIDAToolkitWatchdog")
     foreach ($tn in $watchdogTasks) {
         # Plan A: Start-Process schtasks.exe
         try {
@@ -354,18 +354,26 @@ function Remove-PreviousWatchdogs {
         } catch { }
     }
 
-    # Also query any wildcard matches via PowerShell
+    # Also query any wildcard matches via PowerShell safely targeting ONLY toolkit tasks
     try {
         Get-ScheduledTask -EA SilentlyContinue |
-            Where-Object { $_.TaskName -like "*EIDToolkit*" -or $_.TaskName -like "*EID_MOHRE*" -or $_.TaskName -like "*Watchdog*" } |
+            Where-Object {
+                $_.TaskName -like "*EIDToolkit*" -or
+                $_.TaskName -like "*EID_MOHRE*" -or
+                $_.TaskName -like "*EID*Watchdog*" -or
+                $_.TaskName -like "*Toolkit*Watchdog*"
+            } |
             ForEach-Object { Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -EA SilentlyContinue }
     } catch { }
 
     # Purge old daemon script files, startup shortcuts, and logs
     $oldFiles = @(
         "$env:ProgramData\EIDToolkit\watchdog.ps1",
+        "$env:ProgramData\EIDToolkit\watchdog.vbs",
         "$env:ProgramData\EID_MOHRE\watchdog.ps1",
+        "$env:ProgramData\EID_MOHRE\watchdog.vbs",
         "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\EIDWatchdog.vbs",
+        "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\EIDWatchdog.vbs",
         "$env:WINDIR\Temp\EIDToolkit-watchdog.log",
         "$env:WINDIR\Temp\EID_MOHRE-watchdog.log"
     )
@@ -374,6 +382,226 @@ function Remove-PreviousWatchdogs {
             if (Test-Path $f) { Remove-Item $f -Force -EA SilentlyContinue }
         } catch { }
     }
+}
+
+# -----------------------------------------------------------------------------
+#  COMPLETE UNINSTALLATION ENGINE (SAFELY SCRUBS ALL TOOLKIT COMPONENTS)
+# -----------------------------------------------------------------------------
+function Execute-CompleteUninstall {
+    Write-Host ""
+    Write-Host "  ================================================================" -ForegroundColor Cyan
+    Write-Host "  Emirates ID Card Toolkit - Complete Uninstallation & Scrubbing" -ForegroundColor Yellow
+    Write-Host "  ================================================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    # [1/9] Stop and delete services
+    Write-Step "[1/9] Stopping and removing toolkit background services..."
+    $ourSvcs = @(Get-TargetSvcs)
+    $extraSvcs = Get-CimInstance Win32_Service -EA SilentlyContinue |
+        Where-Object { $_.PathName -like "*EIDAToolkitService*" -or $_.Name -eq "ICAToolkitService" }
+    $allSvcNames = @()
+    if ($ourSvcs) { $allSvcNames += ($ourSvcs | ForEach-Object { $_.Name }) }
+    if ($extraSvcs) { $allSvcNames += ($extraSvcs | ForEach-Object { $_.Name }) }
+    $uniqueSvcs = $allSvcNames | Select-Object -Unique
+
+    foreach ($sName in $uniqueSvcs) {
+        if ($sName -and $sName -ne "SCardSvr" -and $sName -ne "ScDeviceEnum") {
+            Write-Step "  Stopping and removing service: $sName"
+            Stop-Service -Name $sName -Force -EA SilentlyContinue
+            Start-Process sc.exe -ArgumentList "delete `"$sName`"" -Wait -WindowStyle Hidden -EA SilentlyContinue
+        }
+    }
+    Write-Ok "Toolkit services stopped and removed"
+
+    # [2/9] Terminate running toolkit processes
+    Write-Step "[2/9] Terminating running toolkit processes..."
+    Get-Process $SVC_EXE_NAME.Replace(".exe","") -EA SilentlyContinue |
+        Where-Object { Is-OurPath $_.Path -or $_.Path -like "*EmiratesIDCardToolkitService*" -or $_.Path -like "*EIDAToolkitService*" } |
+        Stop-Process -Force -EA SilentlyContinue
+
+    try {
+        Get-CimInstance Win32_Process -EA SilentlyContinue |
+            Where-Object {
+                $_.CommandLine -like "*EIDToolkit*watchdog*" -or
+                $_.CommandLine -like "*EID_MOHRE*watchdog*" -or
+                $_.CommandLine -like "*EIDWatchdog.vbs*"
+            } | ForEach-Object {
+                Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue
+            }
+    } catch { }
+    Start-Sleep -Seconds 2
+    Write-Ok "Toolkit processes terminated"
+
+    # [3/9] Scheduled tasks and startup watchdogs
+    Write-Step "[3/9] Purging background watchdog tasks and startup daemons..."
+    Remove-PreviousWatchdogs
+    Write-Ok "Watchdog tasks and daemons purged"
+
+    # [4/9] MSI registration and package cleanup
+    Write-Step "[4/9] Cleaning Windows Installer and MSI package registration..."
+    $existing = Find-InstalledMsi
+    if ($existing) {
+        Remove-OldInstall $existing.PSChildName
+        Start-Sleep -Seconds 2
+    } else {
+        Start-Process msiexec.exe -ArgumentList "/x $MSI_PRODUCT /qn /norestart" -Wait -WindowStyle Hidden -EA SilentlyContinue
+    }
+    Clear-MsiRegistration
+    Write-Ok "Toolkit MSI registration scrubbed"
+
+    # [5/9] MorphoSmart USB 64-bit driver package
+    Write-Step "[5/9] Removing MorphoSmart USB 64-bit driver..."
+    $morphoReg = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+                                  "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*" -EA SilentlyContinue |
+        Where-Object { $_.PSChildName -eq "{C2CCA71A-E107-46BA-8365-26E6192EBC34}" -or $_.DisplayName -like "*MorphoSmart USB 64*" }
+    if ($morphoReg) {
+        Write-Step "  Silently uninstalling MorphoSmart driver MSI..."
+        Start-Process msiexec.exe -ArgumentList "/x `"{C2CCA71A-E107-46BA-8365-26E6192EBC34}`" /qn /norestart" -Wait -WindowStyle Hidden -EA SilentlyContinue
+        Start-Sleep -Seconds 2
+    }
+    try {
+        $pnpOut = & pnputil.exe /enum-drivers 2>&1 | Out-String
+        $blocks = $pnpOut -split "(?m)(?=Published Name:\s+)"
+        foreach ($b in $blocks) {
+            if ($b -match "Published Name:\s+(oem\d+\.inf)" -and $b -match "usbbiodriver\.inf" -and $b -match "MORPHO") {
+                $oemFile = $Matches[1]
+                Write-Step "  Removing Morpho driver from Driver Store ($oemFile)..."
+                & pnputil.exe /delete-driver $oemFile /uninstall /force 2>&1 | Out-Null
+            }
+        }
+    } catch { }
+    Write-Ok "MorphoSmart driver cleaned up"
+
+    # [6/9] Inbound firewall rules
+    Write-Step "[6/9] Removing inbound firewall rules..."
+    try {
+        Get-NetFirewallRule -EA SilentlyContinue |
+            Where-Object {
+                $_.DisplayName -eq "Emirates ID Card Toolkit" -or
+                $_.DisplayName -eq "EIDToolkit - Allow inbound" -or
+                $_.DisplayName -like "*Emirates ID Card Toolkit*"
+            } | Remove-NetFirewallRule -EA SilentlyContinue
+    } catch { }
+    try {
+        netsh advfirewall firewall delete rule name="Emirates ID Card Toolkit" 2>$null | Out-Null
+        netsh advfirewall firewall delete rule name="EIDToolkit - Allow inbound" 2>$null | Out-Null
+    } catch { }
+    Write-Ok "Firewall rules removed"
+
+    # [7/9] Hosts file DNS entries
+    Write-Step "[7/9] Removing DNS redirect entries from hosts file..."
+    try {
+        $hostsFile = "$env:WINDIR\System32\drivers\etc\hosts"
+        if (Test-Path $hostsFile) {
+            $hostsItem = Get-Item $hostsFile -EA SilentlyContinue
+            $wasReadOnly = if ($hostsItem) { $hostsItem.IsReadOnly } else { $false }
+            if ($wasReadOnly) { $hostsItem.IsReadOnly = $false }
+
+            $lines = Get-Content $hostsFile -EA SilentlyContinue
+            $filtered = @($lines | Where-Object {
+                $_ -notmatch "toolkitagent\.mohre\.gov\.ae" -and
+                $_ -notmatch "toolkitagent\.emiratesid\.ae"
+            })
+            if ($lines.Count -ne $filtered.Count) {
+                [System.IO.File]::WriteAllLines($hostsFile, $filtered, [System.Text.Encoding]::ASCII)
+                Write-Ok "Purged toolkitagent entries from hosts file"
+            } else {
+                Write-Ok "Hosts file is clean (no toolkit entries found)"
+            }
+            if ($wasReadOnly) { (Get-Item $hostsFile).IsReadOnly = $true }
+        }
+    } catch {
+        Write-Warn "Hosts file cleanup notice: $($_.Exception.Message)"
+    }
+
+    # [8/9] Registry cleanup (Calais SmartCards & Toolkit keys)
+    Write-Step "[8/9] Scrubbing SmartCard ATR registrations and toolkit registry keys..."
+    $calaisRoots = @(
+        "HKLM:\SOFTWARE\Microsoft\Cryptography\Calais\SmartCards",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Cryptography\Calais\SmartCards"
+    )
+    foreach ($cr in $calaisRoots) {
+        if (Test-Path $cr) {
+            Get-ChildItem $cr -EA SilentlyContinue |
+                Where-Object { $_.PSChildName -like "*Emirates ID*" } |
+                ForEach-Object {
+                    Write-Step "  Removing Calais card registration: $($_.PSChildName)"
+                    Remove-Item $_.PSPath -Recurse -Force -EA SilentlyContinue
+                }
+        }
+    }
+    if (Test-Path $REG_PATH) {
+        Remove-Item $REG_PATH -Recurse -Force -EA SilentlyContinue
+    }
+    $parentReg = Split-Path $REG_PATH -Parent
+    if ((Test-Path $parentReg) -and ((Get-ChildItem $parentReg -EA SilentlyContinue).Count -eq 0)) {
+        Remove-Item $parentReg -Force -EA SilentlyContinue
+    }
+    $wowReg = "HKLM:\SOFTWARE\WOW6432Node\Toolkit\EID"
+    if (Test-Path $wowReg) {
+        Remove-Item $wowReg -Recurse -Force -EA SilentlyContinue
+    }
+    $wowParent = Split-Path $wowReg -Parent
+    if ((Test-Path $wowParent) -and ((Get-ChildItem $wowParent -EA SilentlyContinue).Count -eq 0)) {
+        Remove-Item $wowParent -Force -EA SilentlyContinue
+    }
+    Write-Ok "Registry keys cleaned up"
+
+    # [9/9] Program folders, ProgramData, and temp artifacts
+    Write-Step "[9/9] Removing program folders and deployment temporary files..."
+    $dirsToRemove = @(
+        $INSTALL_DIR,
+        "C:\EmiratesIDCardToolkitService_64",
+        "$env:ProgramData\EIDToolkit",
+        "$env:ProgramData\EID_MOHRE"
+    )
+    $altInstall = "C:\Program Files\Emirates ID Card Toolkit Service"
+    if ($altInstall -ne $INSTALL_DIR) { $dirsToRemove += $altInstall }
+
+    foreach ($d in $dirsToRemove) {
+        if ($d -and (Test-Path $d)) {
+            Write-Step "  Deleting directory: $d"
+            Remove-Item $d -Recurse -Force -EA SilentlyContinue
+        }
+    }
+
+    $tempPatterns = @(
+        "$env:WINDIR\Temp\EIDdeploy_*",
+        "$env:WINDIR\Temp\EID_REPACK",
+        "$env:WINDIR\Temp\EIDToolkit*",
+        "$env:WINDIR\Temp\EID_MOHRE*",
+        "$env:TEMP\EIDdeploy_*",
+        "$env:TEMP\EID_REPACK",
+        "$env:TEMP\EIDToolkit*",
+        "$env:TEMP\EID_MOHRE*"
+    )
+    foreach ($tp in $tempPatterns) {
+        Get-ChildItem $tp -EA SilentlyContinue | ForEach-Object {
+            Remove-Item $_.FullName -Recurse -Force -EA SilentlyContinue
+        }
+    }
+
+    # Verify Smart Card Resource Manager (SCardSvr) is intact and active
+    $sc = Get-Service -Name "SCardSvr" -EA SilentlyContinue
+    if ($sc) {
+        if ($sc.StartType -ne "Automatic") {
+            Set-Service -Name "SCardSvr" -StartupType Automatic -EA SilentlyContinue
+        }
+        if ($sc.Status -ne "Running") {
+            Start-Service -Name "SCardSvr" -EA SilentlyContinue
+        }
+        Write-Ok "Verified Windows Smart Card Resource Manager (SCardSvr) is intact and active"
+    }
+
+    Write-Host ""
+    Write-Host "  ================================================================" -ForegroundColor Cyan
+    Write-Host "  [OK] Complete uninstallation finished successfully." -ForegroundColor Green
+    Write-Host "  All toolkit services, files, registry keys, drivers, and tasks" -ForegroundColor Green
+    Write-Host "  have been cleanly removed without affecting OS system files." -ForegroundColor Green
+    Write-Host "  Developer : mujtaba989" -ForegroundColor Gray
+    Write-Host "  Purpose   : Tasheel & Typing Center Technical Maintenance" -ForegroundColor Gray
+    Write-Host "  ================================================================" -ForegroundColor Cyan
+    Write-Host ""
 }
 
 # Ensure all system prerequisites and Visual C++ runtimes are installed
@@ -567,9 +795,17 @@ try {
     Write-Host ""
 
     # -------------------------------------------------------------------------
+    #  EXPLICIT UNINSTALL ACTION DISPATCH
+    # -------------------------------------------------------------------------
+    if ($Action -and ($Action -match 'uninstall|remove')) {
+        Execute-CompleteUninstall
+        return
+    }
+
+    # -------------------------------------------------------------------------
     #  INSTALLATION DETECTION & INTERACTIVE MENU
     # -------------------------------------------------------------------------
-    $hasExisting = (Test-AlreadyInstalled) -or (Find-InstalledMsi) -or (Test-Path $INSTALL_DIR) -or (Get-TargetSvcs) -or (Test-Path "C:\EmiratesIDCardToolkitService_64")
+    $hasExisting = (Test-AlreadyInstalled) -or (Find-InstalledMsi) -or (Test-Path $INSTALL_DIR) -or (Get-TargetSvcs) -or (Test-Path "C:\EmiratesIDCardToolkitService_64") -or (Test-Path $REG_PATH) -or (Test-Path $BACKUP_ROOT)
     $current = (Get-ItemProperty $REG_PATH -Name Version -EA SilentlyContinue).Version
 
     if ($hasExisting) {
@@ -579,7 +815,7 @@ try {
         Write-Host ""
         Write-Host "  Choose an action:" -ForegroundColor Yellow
         Write-Host "    [1] Clean Reinstall (Remove current installation and install fresh)" -ForegroundColor White
-        Write-Host "    [2] Complete Uninstall (Permanently remove toolkit, services, and registry)" -ForegroundColor White
+        Write-Host "    [2] Complete Uninstall (Permanently remove toolkit, services, drivers, and registry)" -ForegroundColor White
         Write-Host "    [3] Exit without making any changes" -ForegroundColor White
         Write-Host ""
 
@@ -597,44 +833,7 @@ try {
 
         switch ($choice.Trim()) {
             "2" {
-                Write-Host ""
-                Write-Step "Executing complete uninstallation..."
-                $ourSvcs = @(Get-TargetSvcs)
-                foreach ($s in $ourSvcs) {
-                    Write-Step "Stopping and removing service: $($s.Name)"
-                    Stop-Service -Name $s.Name -Force -EA SilentlyContinue
-                    Start-Process sc.exe -ArgumentList "delete `"$($s.Name)`"" -Wait -WindowStyle Hidden -EA SilentlyContinue
-                }
-                Get-Process $SVC_EXE_NAME.Replace(".exe","") -EA SilentlyContinue |
-                    Where-Object { Is-OurPath $_.Path -or $_.Path -like "*EmiratesIDCardToolkitService*" } | Stop-Process -Force -EA SilentlyContinue
-                Start-Sleep -Seconds 2
-
-                $existing = Find-InstalledMsi
-                if ($existing) { Remove-OldInstall $existing.PSChildName; Start-Sleep -Seconds 2 }
-                Clear-MsiRegistration
-
-                if (Test-Path $INSTALL_DIR) {
-                    Write-Step "Removing $INSTALL_DIR"
-                    Remove-Item $INSTALL_DIR -Recurse -Force -EA SilentlyContinue
-                }
-                if (Test-Path "C:\EmiratesIDCardToolkitService_64") {
-                    Write-Step "Removing legacy folder C:\EmiratesIDCardToolkitService_64"
-                    Remove-Item "C:\EmiratesIDCardToolkitService_64" -Recurse -Force -EA SilentlyContinue
-                }
-                if (Test-Path $REG_PATH) {
-                    Remove-Item $REG_PATH -Recurse -Force -EA SilentlyContinue
-                }
-
-                Remove-PreviousWatchdogs
-                Write-Step "Removed all background watchdog daemons and scheduled tasks"
-
-                Write-Host ""
-                Write-Host "  ================================================================" -ForegroundColor Cyan
-                Write-Host "  [OK] Complete uninstallation finished successfully." -ForegroundColor Green
-                Write-Host "  Developer : mujtaba989" -ForegroundColor Gray
-                Write-Host "  Purpose   : Tasheel & Typing Center Technical Maintenance" -ForegroundColor Gray
-                Write-Host "  ================================================================" -ForegroundColor Cyan
-                Write-Host ""
+                Execute-CompleteUninstall
                 return
             }
             "3" {

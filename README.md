@@ -69,6 +69,31 @@ This scans 10 subsystem checks, starts any stopped background services, verifies
 
 ---
 
+## Complete Uninstallation & System Restoration
+
+To completely, cleanly, and safely uninstall every single component installed by this toolkit without affecting Windows system files, core OS services, or other third-party smart card readers:
+
+```powershell
+# Interactive uninstaller: Launch and select Option [2]
+irm https://raw.githubusercontent.com/mujtaba989/toolkit/main/install-eid.ps1 | iex
+
+# Or run silent uninstallation directly:
+& { $Action='Uninstall'; irm https://raw.githubusercontent.com/mujtaba989/toolkit/main/install-eid.ps1 | iex }
+```
+
+The 9-step uninstaller engine safely purges:
+1. **Background Services:** Stops and deletes `ICAToolkitService` and `Emirates ID Card Toolkit Service` (keeps native Windows `SCardSvr` running and intact).
+2. **Processes:** Gracefully terminates all `EIDAToolkitService.exe` instances and watchdog monitors.
+3. **Scheduled Tasks & Startup:** Unregisters `EIDToolkit-Watchdog`, `EID_MOHRE-Watchdog`, and removes startup `.vbs` daemons.
+4. **MSI Package:** Uninstalls and scrubs all Windows Installer product registrations for `{E73E6470-DC25-4CCE-B26C-0730283B0D32}`.
+5. **MorphoSmart 64-Bit Driver:** Silently removes the Morpho driver MSI (`{C2CCA71A-E107-46BA-8365-26E6192EBC34}`) and cleans up `usbbiodriver.inf` from the Windows Driver Store without touching generic USB hubs.
+6. **Firewall Rules:** Removes the inbound firewall allowance rules (`Emirates ID Card Toolkit` / `EIDToolkit - Allow inbound`).
+7. **Hosts File:** Safely strips `toolkitagent.mohre.gov.ae` and `toolkitagent.emiratesid.ae` lines from `drivers\etc\hosts` preserving all existing system entries.
+8. **Calais ATR Registrations:** Removes only the custom Emirates ID ATR definitions from `Cryptography\Calais\SmartCards` without touching standard Windows card minidrivers.
+9. **File Directories & Temp Logs:** Deletes installation folders (`C:\Program Files (x86)\Emirates ID Card Toolkit Service`), `C:\ProgramData\EIDToolkit`, `C:\ProgramData\EID_MOHRE`, and temporary deployment artifacts.
+
+---
+
 ## Technical Highlights
 
 1. **Validation Gateway Certificate Maintenance:**
