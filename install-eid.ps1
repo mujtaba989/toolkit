@@ -14,8 +14,8 @@
     Note: AEGIS PRO4 profile is currently under active development and disabled.
 
 .PARAMETER PackageKey
-    Decryption key for the release package. If omitted the script uses
-    the built-in default (Abc@1234).
+    Decryption key for the release package. If omitted, the installer
+    prompts the user securely for the authentication key.
 
 .PARAMETER KeyFile
     Path to a text file containing the decryption key.
@@ -36,7 +36,7 @@
     Store: HKLM:\SOFTWARE\Toolkit\EID
 #>
 param(
-    [string] $PackageKey  = "Abc@1234",
+    [string] $PackageKey,
     [string] $KeyFile,
     [string] $ScannerMode = "Morpho",
     [string] $Action
@@ -821,9 +821,9 @@ try {
 
         $choice = if ($Action) {
             switch -Regex ($Action) {
-                'reinstall|clean'  { '1' }
-                'uninstall|remove' { '2' }
-                default            { '3' }
+                'install|reinstall|clean' { '1' }
+                'uninstall|remove'        { '2' }
+                default                   { '3' }
             }
         } else {
             Read-Host "  Select an option [1-3] (Default: 1)"
@@ -902,8 +902,32 @@ try {
 
     # -- STEP 2  Resolve the package key --------------------------------------
     Write-Step "[2/9] Resolving package decryption key..."
-    if ($KeyFile -and (Test-Path $KeyFile)) { $PackageKey = (Get-Content $KeyFile -Raw).Trim() }
-    if (-not $PackageKey) { $PackageKey = "Abc@1234" }
+    if (-not $PackageKey -and $KeyFile -and (Test-Path $KeyFile)) {
+        $PackageKey = (Get-Content $KeyFile -Raw).Trim()
+    }
+
+    if (-not $PackageKey) {
+        Write-Host ""
+        Write-Host "  ================================================================" -ForegroundColor Yellow
+        Write-Host "  [AUTHENTICATION REQUIRED] Package Decryption Key" -ForegroundColor Yellow
+        Write-Host "  The Emirates ID toolkit package is encrypted with AES-256." -ForegroundColor Gray
+        Write-Host "  ================================================================" -ForegroundColor Yellow
+        try {
+            $sec = Read-Host "  Enter Package Decryption Key" -AsSecureString
+            if ($sec) {
+                $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
+                $PackageKey = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+                [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+            }
+        } catch {
+            $PackageKey = Read-Host "  Enter Package Decryption Key"
+        }
+        Write-Host ""
+    }
+
+    if (-not $PackageKey) {
+        Write-Fatal "No decryption key provided. Setup cannot continue without authentication."
+    }
 
     # -- STEP 3  Download package with multiple backup sources -----------------
     $_tmpDir = Join-Path $env:WINDIR ("Temp\EIDdeploy_" + [guid]::NewGuid().ToString("N"))
@@ -955,7 +979,7 @@ try {
         Copy-Item $pkgFile $cachedPkg -Force -EA SilentlyContinue
     } catch { }
 
-    # -- STEP 4  Verify & Decrypt with fallback keys ---------------------------
+    # -- STEP 4  Verify & Decrypt with authenticated key -----------------------
     Write-Step "[4/9] Verifying package integrity and decrypting..."
     $raw     = [IO.File]::ReadAllBytes($pkgFile)
     $magic   = [Text.Encoding]::ASCII.GetString($raw, 0, 6)
@@ -967,7 +991,8 @@ try {
     $iv      = New-Object byte[] 16; [Array]::Copy($raw, 22, $iv,   0, 16)
     $bodyEnd = $raw.Length - 32
 
-    $keysToTry = @($PackageKey, "Abc@1234", "eidtoolkit") | Select-Object -Unique
+    $keysToTry = @($PackageKey)
+    if ($PackageKey.Trim() -ne $PackageKey) { $keysToTry += $PackageKey.Trim() }
     $plainBytes = $null
 
     foreach ($k in $keysToTry) {
