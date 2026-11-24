@@ -445,15 +445,18 @@ function Ensure-MorphoDriver([string]$TempDir) {
     $pnpOut = & pnputil.exe /enum-drivers 2>$null | Out-String
     $pnpInstalled = ($pnpOut -match "usbbiodriver\.inf" -or $pnpOut -match "MORPHO")
 
-    # Check 3: Connected Morpho hardware error / yellow bang check
+    # Check 3: Connected Morpho hardware error / yellow bang check (only physically present devices)
     $morphoDevices = Get-PnpDevice -EA SilentlyContinue | Where-Object {
-        $_.InstanceId -match "VID_079B" -or $_.InstanceId -match "VID_225D" -or $_.FriendlyName -like "*Morpho*"
+        ($_.InstanceId -match "VID_079B" -or $_.InstanceId -match "VID_225D" -or $_.FriendlyName -like "*Morpho*") -and
+        $_.Present -eq $true
     }
     $hardwareError = $false
     foreach ($dev in $morphoDevices) {
-        if ($dev.Status -ne "OK" -or $dev.Problem -ne 0) {
+        $prob = [string]$dev.Problem
+        # Ignore phantom/unplugged codes (45 / CM_PROB_PHANTOM) and normal OK (0 / None / empty)
+        if ($dev.Status -ne "OK" -and $prob -notin @("0", "45", "CM_PROB_PHANTOM", "None", "")) {
             $hardwareError = $true
-            Write-Warn "Connected Morpho hardware has error status ($($dev.FriendlyName) - Problem $($dev.Problem))"
+            Write-Warn "Connected Morpho hardware has error status ($($dev.FriendlyName) - Problem $prob)"
         }
     }
 
@@ -470,14 +473,14 @@ function Ensure-MorphoDriver([string]$TempDir) {
 
     # Locate driver source folder (x64)
     $x64Dir = $null
-    $candidates = @(
-        (Join-Path $PSScriptRoot "x64"),
-        "E:\Github\toolkit\x64",
-        (Join-Path $BACKUP_ROOT "x64"),
-        (Join-Path $TempDir "x64")
-    )
+    $candidates = @()
+    if ($PSScriptRoot) { $candidates += (Join-Path $PSScriptRoot "x64") }
+    $candidates += "E:\Github\toolkit\x64"
+    if ($BACKUP_ROOT) { $candidates += (Join-Path $BACKUP_ROOT "x64") }
+    if ($TempDir) { $candidates += (Join-Path $TempDir "x64") }
+
     foreach ($c in $candidates) {
-        if ($c -and (Test-Path (Join-Path $c "MorphoSmart USB 64 bits Driver.msi"))) {
+        if ($c -and (Test-Path $c) -and (Test-Path (Join-Path $c "MorphoSmart USB 64 bits Driver.msi"))) {
             $x64Dir = $c
             break
         }
